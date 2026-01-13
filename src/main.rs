@@ -15,12 +15,14 @@ fn main() -> Result<(), iced::Error> {
 
 pub mod eml;
 pub mod encoder;
+pub mod nut;
 pub mod path_length_checker;
 
 struct UI {
     site: Site,
     encoder: encoder::Encoder,
     path_length_checker: path_length_checker::PathLengthChecker,
+    nut: nut::Nut,
 }
 
 #[derive(Clone)]
@@ -30,6 +32,7 @@ pub enum Site {
     Base64,
     Unicode,
     PathLengthChecker,
+    Nut,
 }
 
 #[derive(Clone)]
@@ -38,6 +41,7 @@ pub enum Message {
     SwitchSite(Site),
     Encoder(encoder::Message),
     PathLengthChecker(path_length_checker::Message),
+    Nut(nut::Message),
 }
 
 impl UI {
@@ -46,6 +50,7 @@ impl UI {
             site: Site::Home,
             encoder: encoder::Encoder::new(|str| str.to_string(), |str| str.to_string()),
             path_length_checker: path_length_checker::PathLengthChecker::new(),
+            nut: nut::Nut::new(),
         }
     }
 
@@ -106,7 +111,7 @@ impl UI {
                         );
                         Task::none()
                     }
-                    Site::Home | Site::PathLengthChecker => Task::none(),
+                    Site::Home | Site::PathLengthChecker | Site::Nut => Task::none(),
                 }
             }
             Message::Encoder(message) => self.encoder.update(message).map(Message::Encoder),
@@ -114,6 +119,7 @@ impl UI {
                 .path_length_checker
                 .update(message)
                 .map(Message::PathLengthChecker),
+            Message::Nut(message) => self.nut.update(message).map(Message::Nut),
         }
     }
 
@@ -125,7 +131,8 @@ impl UI {
                         button("EML Encode").on_press(Site::Eml),
                         button("Base64 Encode").on_press(Site::Base64),
                         button("Unicode Encode").on_press(Site::Unicode),
-                        button("Path Length Checker").on_press(Site::PathLengthChecker)
+                        button("Path Length Checker").on_press(Site::PathLengthChecker),
+                        button("NUT Client").on_press(Site::Nut)
                     ]
                     .spacing(10)
                     .height(Length::Fill)
@@ -144,6 +151,7 @@ impl UI {
                         .path_length_checker
                         .view()
                         .map(Message::PathLengthChecker),
+                    Site::Nut => self.nut.view().map(Message::Nut),
                 }
             ]
             .spacing(20)
