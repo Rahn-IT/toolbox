@@ -18,11 +18,11 @@ This is a simple application to find paths which are over the windows path limit
 
 You can Scan a path and then export the found paths into a CSV file.
 
-## Screenshots
+### Screenshots
 
 ![grafik](https://github.com/user-attachments/assets/468261dd-6224-419b-95f0-b94cdfb53894)
 
-## Usage
+### Usage
 
 - [Download the latest version](https://github.com/Rahn-IT/path-length-checker/releases/latest/download/path-length-checker.exe)
 - Open the program and select the folder you'd like to scan
