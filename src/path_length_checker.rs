@@ -44,10 +44,10 @@ enum ScanStatus {
 }
 
 impl ScanStatus {
-    fn is_idle(&self) -> bool {
+    fn has_results(&self) -> bool {
         match self {
-            ScanStatus::WaitingForStart => true,
-            ScanStatus::Scanning(_) => false,
+            ScanStatus::WaitingForStart => false,
+            ScanStatus::Scanning(_) => true,
             ScanStatus::Done => true,
         }
     }
@@ -321,7 +321,7 @@ impl PathLengthChecker {
                 }
                 ScanStatus::WaitingForStart => None,
             },
-            if self.scan_status.is_idle() {
+            if !self.scan_status.has_results() {
                 None
             } else if self.paths_over_limit.is_empty() {
                 Some(text("No paths over limit found"))
