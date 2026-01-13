@@ -1,0 +1,37 @@
+name: Build Windows Release
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    name: Build Windows .exe
+    runs-on: windows-latest
+
+    steps:
+      - uses: hecrj/setup-rust-action@v2
+        with:
+          rust-version: stable
+      - uses: actions/checkout@master
+
+      - uses: actions/cache@v4
+        if: matrix.rust-version != 'nightly'
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-build-${{ matrix.rust-version }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary for Windows
+        run: cargo build --release
+
+      - name: Upload Windows release binary
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/*.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
