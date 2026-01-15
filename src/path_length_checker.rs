@@ -196,10 +196,7 @@ impl PathLengthChecker {
                                         for path in chunk {
                                             chunk_content.push_str(&format!(
                                                 "{};\"{}\"\n",
-                                                path.size,
-                                                path.path
-                                                    .replace("\\", "\\\\")
-                                                    .replace("\"", "\"\""),
+                                                path.size, path.path,
                                             ));
                                         }
 
@@ -383,7 +380,7 @@ impl PathLengthChecker {
                             Ok(mut entries) => {
                                 while let Ok(Some(entry)) = entries.next_entry().await {
                                     let entry_path = entry.path();
-                                    let path_length = entry_path.as_os_str().len();
+                                    let path_length = entry_path.to_string_lossy().len();
 
                                     if path_length > limit {
                                         over_limit.push(OverLimit {
