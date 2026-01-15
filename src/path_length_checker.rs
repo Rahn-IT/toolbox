@@ -380,14 +380,12 @@ impl PathLengthChecker {
                             Ok(mut entries) => {
                                 while let Ok(Some(entry)) = entries.next_entry().await {
                                     let entry_path = entry.path();
-                                    let path_length = entry_path.to_string_lossy().len();
+                                    let path_str = entry_path.to_string_lossy().to_string();
+                                    let path_length = path_str.len();
 
                                     if path_length > limit {
                                         over_limit.push(OverLimit {
-                                            path: entry_path
-                                                .as_os_str()
-                                                .to_string_lossy()
-                                                .to_string(),
+                                            path: path_str,
                                             size: path_length as u64,
                                         });
                                     }
