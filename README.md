@@ -31,6 +31,10 @@ You can Scan a path and then export the found paths into a CSV file.
 - Wait for the scan to finish
 - Click on "Export CSV" and select a location to save your report
 
+## Simple NUT client
+
+I integrated a very simple client which displays the raw numbers from a Network UPS Tools server for debugging.
+
 # Attribution
 
 This project is licensed under the [MIT License](LICENSE).
