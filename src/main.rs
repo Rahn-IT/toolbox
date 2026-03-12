@@ -17,17 +17,20 @@ pub mod eml;
 pub mod encoder;
 pub mod nut;
 pub mod path_length_checker;
+pub mod quick_install;
 
 struct UI {
     site: Site,
     encoder: encoder::Encoder,
     path_length_checker: path_length_checker::PathLengthChecker,
+    quick_install: quick_install::QuickInstall,
     nut: nut::Nut,
 }
 
 #[derive(Clone)]
 pub enum Site {
     Home,
+    QuickInstall,
     Eml,
     Base64,
     Unicode,
@@ -41,6 +44,7 @@ pub enum Message {
     SwitchSite(Site),
     Encoder(encoder::Message),
     PathLengthChecker(path_length_checker::Message),
+    QuickInstall(quick_install::Message),
     Nut(nut::Message),
 }
 
@@ -50,6 +54,7 @@ impl UI {
             site: Site::Home,
             encoder: encoder::Encoder::new(|str| str.to_string(), |str| str.to_string()),
             path_length_checker: path_length_checker::PathLengthChecker::new(),
+            quick_install: quick_install::QuickInstall::new(),
             nut: nut::Nut::new(),
         }
     }
@@ -70,6 +75,7 @@ impl UI {
 
                 self.path_length_checker.cancel_scan();
                 match site {
+                    Site::QuickInstall => Task::none(),
                     Site::Eml => {
                         self.site = Site::Eml;
                         self.encoder.set_encoding(eml::qp_encode, eml::qp_decode);
@@ -119,6 +125,9 @@ impl UI {
                 .path_length_checker
                 .update(message)
                 .map(Message::PathLengthChecker),
+            Message::QuickInstall(message) => {
+                self.quick_install.update(message).map(Message::QuickInstall)
+            }
             Message::Nut(message) => self.nut.update(message).map(Message::Nut),
         }
     }
@@ -128,6 +137,7 @@ impl UI {
             row![
                 iced::Element::from(
                     column![
+                        button("Quick Install").on_press(Site::QuickInstall),
                         button("EML Encode").on_press(Site::Eml),
                         button("Base64 Encode").on_press(Site::Base64),
                         button("Unicode Encode").on_press(Site::Unicode),
@@ -141,6 +151,7 @@ impl UI {
                 rule::vertical(2),
                 match self.site {
                     Site::Home => "Toolbox".into(),
+                    Site::QuickInstall => self.quick_install.view().map(Message::QuickInstall),
                     Site::Eml => self
                         .encoder
                         .view("Encoder for qouted printable encoding in EML files")
