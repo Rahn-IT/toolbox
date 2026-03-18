@@ -2,7 +2,27 @@
 
 This is a small collection of useful tools as a simple to download and run executable written in Rust.
 
+## ⚠️WARNING⚠️
+
+> [!WARNING]
+> **This repository is partially vibe coded.**
+>
+> While I built most of the code myself, I used an agent to build the more boring parts. It does still struggle a bit with iced, so I do still need to do a few refactors here and there.
+>
+> It's a very simple app and we use it ourselves, but I still feel like it should be openly disclosed,
+> as it will always influence code quality.
+>
+> Feel free to check out the code if you're unsure
+
 # tools
+
+## quick install (windows only)
+
+The quick install is basically the same as ninite or other quick install tools.
+It just downloads the installers and runs them for you. It will still ask for admin rights if needed though.
+This is just a small list of applications I need from time to time. PRs are welcome though.
+
+<img width="804" height="724" alt="quick_install" src="https://github.com/user-attachments/assets/bfb833c1-49f7-4a61-8fbc-68a6aa5eb05e" />
 
 ## Encode / Decoder
 
