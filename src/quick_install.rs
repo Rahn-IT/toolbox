@@ -223,7 +223,6 @@ impl Selection {
         };
 
         let filter_empty = installers.is_empty();
-        let has_selection = !self.install_selection.is_empty();
 
         let installer_list = column(
             installers
@@ -250,15 +249,15 @@ impl Selection {
                 scrollable(installer_list).height(Length::Fill).into()
             },
             row![
-                button("Deselect all").on_press_maybe(if has_selection {
+                button("Deselect all").on_press_maybe(if self.install_selection.is_empty() {
+                    None
+                } else {
                     Some(Message::DeselectAll)
-                } else {
-                    None
                 }),
-                button("Install selected").on_press_maybe(if has_selection {
-                    Some(Message::InstallSelected)
-                } else {
+                button("Install selected").on_press_maybe(if self.install_selection.is_empty() {
                     None
+                } else {
+                    Some(Message::InstallSelected)
                 })
             ]
             .spacing(12),
