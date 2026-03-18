@@ -104,6 +104,28 @@ pub async fn run_elevated_installer(path: &Path, parameters: &[&str]) -> Result<
     })
 }
 
+pub async fn run_installer(path: &Path, parameters: &[&str]) -> Result<(), String> {
+    let output = Command::new(path)
+        .args(parameters)
+        .output()
+        .await
+        .map_err(|error| format!("failed to start installer {}: {error}", path.display()))?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let details = if !stderr.is_empty() { stderr } else { stdout };
+
+    Err(if details.is_empty() {
+        format!("installer {} failed", path.display())
+    } else {
+        details
+    })
+}
+
 pub async fn remove_file_if_exists(path: &Path) {
     let _ = fs::remove_file(path).await;
 }

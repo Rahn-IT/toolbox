@@ -1,7 +1,10 @@
 mod chrome;
 mod common;
+mod discord;
 mod firefox;
 mod seven_zip;
+mod spotify;
+mod steam;
 mod windirstat;
 
 use std::{collections::BTreeSet, future::Future, pin::Pin};
@@ -12,10 +15,14 @@ use iced::{
 };
 
 const INSTALLERS: &[&dyn Installer] = &[
-    &firefox::INSTALLER,
     &chrome::INSTALLER,
-    &seven_zip::INSTALLER,
+    &discord::INSTALLER,
+    &firefox::INSTALLER,
+    &spotify::INSTALLER,
+    &steam::INSTALLER,
     &windirstat::INSTALLER,
+    // display starts with a number, so at the bottom
+    &seven_zip::INSTALLER,
 ];
 
 type InstallFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
@@ -82,7 +89,9 @@ impl QuickInstall {
                 QuickInstall::Installing(_) => Task::none(),
             },
             Message::FilterChanged(filter) => match self {
-                QuickInstall::Selection(selection) => selection.update(Message::FilterChanged(filter)),
+                QuickInstall::Selection(selection) => {
+                    selection.update(Message::FilterChanged(filter))
+                }
                 QuickInstall::Installing(_) => Task::none(),
             },
             Message::DeselectAll => match self {
