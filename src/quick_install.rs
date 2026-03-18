@@ -7,8 +7,8 @@ mod windirstat;
 use std::{collections::BTreeSet, future::Future, pin::Pin};
 
 use iced::{
-    Length, Task,
-    widget::{Column, button, checkbox, text},
+    Element, Length, Task,
+    widget::{Column, button, checkbox, column, scrollable, text, text_input},
 };
 
 const INSTALLERS: &[&dyn Installer] = &[
@@ -36,6 +36,7 @@ pub enum Message {
 #[derive(Clone, Debug)]
 pub enum SelectionMessage {
     Toggled(&'static str, bool),
+    FilterChanged(String),
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +57,7 @@ pub enum QuickInstall {
 
 pub struct Selection {
     install_selection: InstallSelection,
+    filter: String,
     status_message: Option<String>,
     install_success: bool,
 }
@@ -69,6 +71,7 @@ impl QuickInstall {
     pub fn new() -> Self {
         Self::Selection(Selection {
             install_selection: InstallSelection::default(),
+            filter: String::new(),
             status_message: None,
             install_success: false,
         })
@@ -93,6 +96,7 @@ impl QuickInstall {
                         self,
                         QuickInstall::Selection(Selection {
                             install_selection: InstallSelection::default(),
+                            filter: String::new(),
                             status_message: None,
                             install_success: false,
                         }),
@@ -146,6 +150,9 @@ impl Selection {
             SelectionMessage::Toggled(installer_id, value) => {
                 self.install_selection.set(installer_id, value);
             }
+            SelectionMessage::FilterChanged(filter) => {
+                self.filter = filter;
+            }
         }
 
         Task::none()
@@ -189,33 +196,65 @@ impl Selection {
             .clone()
             .unwrap_or_else(|| "Select the applications to install.".to_string());
 
-        let mut content = Column::new()
-            .spacing(12)
-            .padding(20)
-            .width(Length::Fill)
-            .push(text("Quick Install").size(24))
-            .push(text("Selection").size(18));
-
-        for installer in INSTALLERS {
-            let installer_id = installer.id();
-            content = content.push(
-                checkbox(self.install_selection.contains(installer_id))
-                    .label(installer.name())
-                    .on_toggle(move |value| {
-                        Message::Selection(SelectionMessage::Toggled(installer_id, value))
-                    }),
-            );
-        }
-
-        content = content.push(button("Install selected").on_press(Message::InstallSelected));
-
-        content = if self.install_success {
-            content.push(text(status).style(text::success))
+        let normalized_filter = self.filter.trim().to_ascii_lowercase();
+        let installers: Vec<_> = if normalized_filter.is_empty() {
+            INSTALLERS.to_vec()
         } else {
-            content.push(text(status))
+            INSTALLERS
+                .into_iter()
+                .filter(|installer| {
+                    installer.name().contains(&normalized_filter)
+                        || installer.id().contains(&normalized_filter)
+                })
+                .cloned()
+                .collect()
         };
 
-        content.into()
+        let filter_empty = installers.is_empty();
+
+        let installer_list = column(
+            installers
+                .into_iter()
+                .map(|installer| {
+                    let id = installer.id();
+                    Element::from(
+                        checkbox(self.install_selection.contains(id))
+                            .label(installer.name())
+                            .on_toggle(move |value| {
+                                Message::Selection(SelectionMessage::Toggled(id, value))
+                            }),
+                    )
+                })
+                .collect::<Vec<Element<'_, Message>>>(),
+        )
+        .spacing(12);
+
+        column![
+            text("Quick Install").size(24),
+            text("Selection").size(18),
+            text_input("Filter applications...", &self.filter)
+                .on_input(|value| Message::Selection(SelectionMessage::FilterChanged(value))),
+            if filter_empty {
+                Element::from(text("No applications match the current filter."))
+            } else {
+                scrollable(installer_list).height(Length::Fill).into()
+            },
+            button("Install selected").on_press_maybe(if self.install_selection.is_empty() {
+                None
+            } else {
+                Some(Message::InstallSelected)
+            }),
+            if self.install_success {
+                text(status).style(text::success)
+            } else {
+                text(status)
+            }
+        ]
+        .spacing(12)
+        .padding(20)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     }
 }
 
@@ -223,6 +262,7 @@ impl Installing {
     fn finish_install(self, outcome: InstallOutcome) -> Selection {
         let mut selection = Selection {
             install_selection: self.install_selection,
+            filter: String::new(),
             status_message: None,
             install_success: false,
         };
@@ -253,6 +293,10 @@ impl InstallSelection {
         } else {
             self.selected.remove(&installer_id);
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.selected.is_empty()
     }
 }
 
