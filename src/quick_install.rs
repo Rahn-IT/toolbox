@@ -8,7 +8,7 @@ use std::{collections::BTreeSet, future::Future, pin::Pin};
 
 use iced::{
     Element, Length, Task,
-    widget::{Column, button, checkbox, column, scrollable, text, text_input},
+    widget::{Column, button, checkbox, column, row, scrollable, text, text_input},
 };
 
 const INSTALLERS: &[&dyn Installer] = &[
@@ -28,15 +28,11 @@ pub trait Installer: Sync {
 
 #[derive(Clone, Debug)]
 pub enum Message {
-    Selection(SelectionMessage),
-    InstallSelected,
-    InstallFinished(InstallOutcome),
-}
-
-#[derive(Clone, Debug)]
-pub enum SelectionMessage {
     Toggled(&'static str, bool),
     FilterChanged(String),
+    DeselectAll,
+    InstallSelected,
+    InstallFinished(InstallOutcome),
 }
 
 #[derive(Clone, Debug)]
@@ -79,9 +75,20 @@ impl QuickInstall {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Selection(message) => match self {
+            Message::Toggled(installer_id, value) => match self {
                 QuickInstall::Selection(selection) => {
-                    selection.update(message).map(Message::Selection)
+                    selection.update(Message::Toggled(installer_id, value))
+                }
+                QuickInstall::Installing(_) => Task::none(),
+            },
+            Message::FilterChanged(filter) => match self {
+                QuickInstall::Selection(selection) => selection.update(Message::FilterChanged(filter)),
+                QuickInstall::Installing(_) => Task::none(),
+            },
+            Message::DeselectAll => match self {
+                QuickInstall::Selection(selection) => {
+                    selection.clear_selection();
+                    Task::none()
                 }
                 QuickInstall::Installing(_) => Task::none(),
             },
@@ -145,14 +152,15 @@ impl QuickInstall {
 }
 
 impl Selection {
-    pub fn update(&mut self, message: SelectionMessage) -> Task<SelectionMessage> {
+    pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            SelectionMessage::Toggled(installer_id, value) => {
+            Message::Toggled(installer_id, value) => {
                 self.install_selection.set(installer_id, value);
             }
-            SelectionMessage::FilterChanged(filter) => {
+            Message::FilterChanged(filter) => {
                 self.filter = filter;
             }
+            Message::DeselectAll | Message::InstallSelected | Message::InstallFinished(_) => {}
         }
 
         Task::none()
@@ -190,6 +198,10 @@ impl Selection {
             .collect()
     }
 
+    fn clear_selection(&mut self) {
+        self.install_selection.clear();
+    }
+
     pub fn view(&self) -> iced::Element<'_, Message> {
         let status = self
             .status_message
@@ -211,6 +223,7 @@ impl Selection {
         };
 
         let filter_empty = installers.is_empty();
+        let has_selection = !self.install_selection.is_empty();
 
         let installer_list = column(
             installers
@@ -220,9 +233,7 @@ impl Selection {
                     Element::from(
                         checkbox(self.install_selection.contains(id))
                             .label(installer.name())
-                            .on_toggle(move |value| {
-                                Message::Selection(SelectionMessage::Toggled(id, value))
-                            }),
+                            .on_toggle(move |value| Message::Toggled(id, value)),
                     )
                 })
                 .collect::<Vec<Element<'_, Message>>>(),
@@ -232,18 +243,25 @@ impl Selection {
         column![
             text("Quick Install").size(24),
             text("Selection").size(18),
-            text_input("Filter applications...", &self.filter)
-                .on_input(|value| Message::Selection(SelectionMessage::FilterChanged(value))),
+            text_input("Filter applications...", &self.filter).on_input(Message::FilterChanged),
             if filter_empty {
                 Element::from(text("No applications match the current filter."))
             } else {
                 scrollable(installer_list).height(Length::Fill).into()
             },
-            button("Install selected").on_press_maybe(if self.install_selection.is_empty() {
-                None
-            } else {
-                Some(Message::InstallSelected)
-            }),
+            row![
+                button("Deselect all").on_press_maybe(if has_selection {
+                    Some(Message::DeselectAll)
+                } else {
+                    None
+                }),
+                button("Install selected").on_press_maybe(if has_selection {
+                    Some(Message::InstallSelected)
+                } else {
+                    None
+                })
+            ]
+            .spacing(12),
             if self.install_success {
                 text(status).style(text::success)
             } else {
@@ -285,6 +303,10 @@ impl Installing {
 impl InstallSelection {
     fn contains(&self, installer_id: &'static str) -> bool {
         self.selected.contains(&installer_id)
+    }
+
+    fn clear(&mut self) {
+        self.selected.clear();
     }
 
     fn set(&mut self, installer_id: &'static str, selected: bool) {
