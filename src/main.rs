@@ -17,12 +17,14 @@ pub mod eml;
 pub mod encoder;
 pub mod nut;
 pub mod path_length_checker;
+#[cfg(windows)]
 pub mod quick_install;
 
 struct UI {
     site: Site,
     encoder: encoder::Encoder,
     path_length_checker: path_length_checker::PathLengthChecker,
+    #[cfg(windows)]
     quick_install: quick_install::QuickInstall,
     nut: nut::Nut,
 }
@@ -30,6 +32,7 @@ struct UI {
 #[derive(Clone)]
 pub enum Site {
     Home,
+    #[cfg(windows)]
     QuickInstall,
     Eml,
     Base64,
@@ -44,6 +47,7 @@ pub enum Message {
     SwitchSite(Site),
     Encoder(encoder::Message),
     PathLengthChecker(path_length_checker::Message),
+    #[cfg(windows)]
     QuickInstall(quick_install::Message),
     Nut(nut::Message),
 }
@@ -54,6 +58,7 @@ impl UI {
             site: Site::Home,
             encoder: encoder::Encoder::new(|str| str.to_string(), |str| str.to_string()),
             path_length_checker: path_length_checker::PathLengthChecker::new(),
+            #[cfg(windows)]
             quick_install: quick_install::QuickInstall::new(),
             nut: nut::Nut::new(),
         }
@@ -125,9 +130,11 @@ impl UI {
                 .path_length_checker
                 .update(message)
                 .map(Message::PathLengthChecker),
-            Message::QuickInstall(message) => {
-                self.quick_install.update(message).map(Message::QuickInstall)
-            }
+            #[cfg(windows)]
+            Message::QuickInstall(message) => self
+                .quick_install
+                .update(message)
+                .map(Message::QuickInstall),
             Message::Nut(message) => self.nut.update(message).map(Message::Nut),
         }
     }
@@ -137,6 +144,7 @@ impl UI {
             row![
                 iced::Element::from(
                     column![
+                        #[cfg(windows)]
                         button("Quick Install").on_press(Site::QuickInstall),
                         button("EML Encode").on_press(Site::Eml),
                         button("Base64 Encode").on_press(Site::Base64),
@@ -151,6 +159,7 @@ impl UI {
                 rule::vertical(2),
                 match self.site {
                     Site::Home => "Toolbox".into(),
+                    #[cfg(windows)]
                     Site::QuickInstall => self.quick_install.view().map(Message::QuickInstall),
                     Site::Eml => self
                         .encoder

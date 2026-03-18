@@ -1,12 +1,30 @@
-mod common;
 mod chrome;
+mod common;
 mod firefox;
 mod seven_zip;
+mod windirstat;
+
+use std::{collections::BTreeSet, future::Future, pin::Pin};
 
 use iced::{
     Length, Task,
-    widget::{button, checkbox, column, text},
+    widget::{Column, button, checkbox, text},
 };
+
+const INSTALLERS: &[&dyn Installer] = &[
+    &firefox::INSTALLER,
+    &chrome::INSTALLER,
+    &seven_zip::INSTALLER,
+    &windirstat::INSTALLER,
+];
+
+type InstallFuture<'a> = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+
+pub trait Installer: Sync {
+    fn id(&self) -> &'static str;
+    fn name(&self) -> &'static str;
+    fn install(&self) -> InstallFuture<'_>;
+}
 
 #[derive(Clone, Debug)]
 pub enum Message {
@@ -17,9 +35,7 @@ pub enum Message {
 
 #[derive(Clone, Debug)]
 pub enum SelectionMessage {
-    FirefoxToggled(bool),
-    ChromeToggled(bool),
-    SevenZipToggled(bool),
+    Toggled(&'static str, bool),
 }
 
 #[derive(Clone, Debug)]
@@ -30,9 +46,7 @@ pub struct InstallOutcome {
 
 #[derive(Clone, Debug, Default)]
 struct InstallSelection {
-    firefox: bool,
-    chrome: bool,
-    seven_zip: bool,
+    selected: BTreeSet<&'static str>,
 }
 
 pub enum QuickInstall {
@@ -129,9 +143,9 @@ impl QuickInstall {
 impl Selection {
     pub fn update(&mut self, message: SelectionMessage) -> Task<SelectionMessage> {
         match message {
-            SelectionMessage::FirefoxToggled(value) => self.install_selection.firefox = value,
-            SelectionMessage::ChromeToggled(value) => self.install_selection.chrome = value,
-            SelectionMessage::SevenZipToggled(value) => self.install_selection.seven_zip = value,
+            SelectionMessage::Toggled(installer_id, value) => {
+                self.install_selection.set(installer_id, value);
+            }
         }
 
         Task::none()
@@ -162,19 +176,11 @@ impl Selection {
     }
 
     fn selected_installers(&self) -> Vec<&'static str> {
-        let mut selected = Vec::new();
-
-        if self.install_selection.firefox {
-            selected.push("Firefox");
-        }
-        if self.install_selection.chrome {
-            selected.push("Chrome");
-        }
-        if self.install_selection.seven_zip {
-            selected.push("7-Zip");
-        }
-
-        selected
+        INSTALLERS
+            .iter()
+            .filter(|installer| self.install_selection.contains(installer.id()))
+            .map(|installer| installer.name())
+            .collect()
     }
 
     pub fn view(&self) -> iced::Element<'_, Message> {
@@ -183,29 +189,33 @@ impl Selection {
             .clone()
             .unwrap_or_else(|| "Select the applications to install.".to_string());
 
-        column![
-            text("Quick Install").size(24),
-            text("Selection").size(18),
-            checkbox(self.install_selection.firefox)
-                .label("Firefox")
-                .on_toggle(|value| Message::Selection(SelectionMessage::FirefoxToggled(value))),
-            checkbox(self.install_selection.chrome)
-                .label("Chrome")
-                .on_toggle(|value| Message::Selection(SelectionMessage::ChromeToggled(value))),
-            checkbox(self.install_selection.seven_zip)
-                .label("7-Zip")
-                .on_toggle(|value| Message::Selection(SelectionMessage::SevenZipToggled(value))),
-            button("Install selected").on_press(Message::InstallSelected),
-            if self.install_success {
-                text(status).style(text::success)
-            } else {
-                text(status)
-            },
-        ]
-        .spacing(12)
-        .padding(20)
-        .width(Length::Fill)
-        .into()
+        let mut content = Column::new()
+            .spacing(12)
+            .padding(20)
+            .width(Length::Fill)
+            .push(text("Quick Install").size(24))
+            .push(text("Selection").size(18));
+
+        for installer in INSTALLERS {
+            let installer_id = installer.id();
+            content = content.push(
+                checkbox(self.install_selection.contains(installer_id))
+                    .label(installer.name())
+                    .on_toggle(move |value| {
+                        Message::Selection(SelectionMessage::Toggled(installer_id, value))
+                    }),
+            );
+        }
+
+        content = content.push(button("Install selected").on_press(Message::InstallSelected));
+
+        content = if self.install_success {
+            content.push(text(status).style(text::success))
+        } else {
+            content.push(text(status))
+        };
+
+        content.into()
     }
 }
 
@@ -221,15 +231,28 @@ impl Installing {
     }
 
     fn view(&self) -> iced::Element<'_, Message> {
-        column![
-            text("Quick Install").size(24),
-            text("Installing").size(18),
-            text(&self.status_message),
-        ]
-        .spacing(12)
-        .padding(20)
-        .width(Length::Fill)
-        .into()
+        Column::new()
+            .spacing(12)
+            .padding(20)
+            .width(Length::Fill)
+            .push(text("Quick Install").size(24))
+            .push(text("Installing").size(18))
+            .push(text(&self.status_message))
+            .into()
+    }
+}
+
+impl InstallSelection {
+    fn contains(&self, installer_id: &'static str) -> bool {
+        self.selected.contains(&installer_id)
+    }
+
+    fn set(&mut self, installer_id: &'static str, selected: bool) {
+        if selected {
+            self.selected.insert(installer_id);
+        } else {
+            self.selected.remove(&installer_id);
+        }
     }
 }
 
@@ -239,24 +262,14 @@ async fn run_installers(selection: InstallSelection) -> InstallOutcome {
         failed: Vec::new(),
     };
 
-    if selection.firefox {
-        match firefox::install().await {
-            Ok(()) => outcome.succeeded.push("Firefox"),
-            Err(error) => outcome.failed.push(("Firefox", error)),
+    for installer in INSTALLERS {
+        if !selection.contains(installer.id()) {
+            continue;
         }
-    }
 
-    if selection.chrome {
-        match chrome::install().await {
-            Ok(()) => outcome.succeeded.push("Chrome"),
-            Err(error) => outcome.failed.push(("Chrome", error)),
-        }
-    }
-
-    if selection.seven_zip {
-        match seven_zip::install().await {
-            Ok(()) => outcome.succeeded.push("7-Zip"),
-            Err(error) => outcome.failed.push(("7-Zip", error)),
+        match installer.install().await {
+            Ok(()) => outcome.succeeded.push(installer.name()),
+            Err(error) => outcome.failed.push((installer.name(), error)),
         }
     }
 

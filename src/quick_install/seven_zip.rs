@@ -2,17 +2,36 @@ use std::path::Path;
 
 use regex::Regex;
 
-use super::common::{download_to_temp, fetch_text, remove_file_if_exists, run_elevated_installer};
+use super::{
+    InstallFuture, Installer,
+    common::{download_to_temp, fetch_text, remove_file_if_exists, run_elevated_installer},
+};
 
-pub async fn install() -> Result<(), String> {
-    let html = fetch_text("https://7-zip.org/").await?;
-    let download_url = find_7zip_download_url(&html)?;
-    let file_name = installer_file_name(&download_url);
-    let path = download_to_temp(&download_url, &file_name).await?;
+pub const INSTALLER: SevenZipInstaller = SevenZipInstaller;
 
-    let result = run_elevated_installer(&path, &["/S"]).await;
-    remove_file_if_exists(&path).await;
-    result
+pub struct SevenZipInstaller;
+
+impl Installer for SevenZipInstaller {
+    fn id(&self) -> &'static str {
+        "7zip"
+    }
+
+    fn name(&self) -> &'static str {
+        "7-Zip"
+    }
+
+    fn install(&self) -> InstallFuture<'_> {
+        Box::pin(async move {
+            let html = fetch_text("https://7-zip.org/").await?;
+            let download_url = find_download_url(&html)?;
+            let file_name = installer_file_name(&download_url);
+            let path = download_to_temp(&download_url, &file_name).await?;
+
+            let result = run_elevated_installer(&path, &["/S"]).await;
+            remove_file_if_exists(&path).await;
+            result
+        })
+    }
 }
 
 fn installer_file_name(download_url: &str) -> String {
@@ -24,7 +43,7 @@ fn installer_file_name(download_url: &str) -> String {
         .to_string()
 }
 
-fn find_7zip_download_url(html: &str) -> Result<String, String> {
+fn find_download_url(html: &str) -> Result<String, String> {
     let regex =
         Regex::new(r#"href="(a/[^"]*-x64\.exe)""#).map_err(|error| format!("invalid regex: {error}"))?;
 
