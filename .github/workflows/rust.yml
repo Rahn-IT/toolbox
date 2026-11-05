@@ -1,37 +1,47 @@
 name: Build Windows Release
 
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
 
 jobs:
   build:
-    name: Build Windows .exe
+    name: Build and publish Windows executable
     runs-on: windows-latest
 
     steps:
-      - uses: hecrj/setup-rust-action@v2
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust stable
+        uses: hecrj/setup-rust-action@v2
         with:
           rust-version: stable
-      - uses: actions/checkout@master
-
-      - uses: actions/cache@v4
-        if: matrix.rust-version != 'nightly'
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-build-${{ matrix.rust-version }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binary for Windows
-        run: cargo build --release
-
-      - name: Upload Windows release binary
-        uses: softprops/action-gh-release@v2
-        with:
-          files: target/release/*.exe
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo build --release --locked --package toolbox --bin toolbox --target x86_64-pc-windows-msvc
+
+      - name: Name release binary
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: Copy-Item -LiteralPath target/x86_64-pc-windows-msvc/release/toolbox.exe -Destination "toolbox-$env:RELEASE_TAG-windows-x86_64.exe"
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create "$env:RELEASE_TAG"
+          "toolbox-$env:RELEASE_TAG-windows-x86_64.exe"
+          --title "Toolbox $env:RELEASE_TAG"
+          --generate-notes
+          --verify-tag

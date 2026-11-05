@@ -10,11 +10,20 @@ use iced::{
 };
 
 fn main() -> Result<(), iced::Error> {
-    iced::application(UI::boot, UI::update, UI::view).run()
+    iced::application(UI::boot, UI::update, UI::view)
+        .window(iced::window::Settings {
+            size: (1400.0, 850.0).into(),
+            min_size: Some((1150.0, 700.0).into()),
+            exit_on_close_request: false,
+            ..Default::default()
+        })
+        .subscription(UI::subscription)
+        .run()
 }
 
 pub mod eml;
 pub mod encoder;
+pub mod mailbox_scanner;
 pub mod nut;
 pub mod path_length_checker;
 #[cfg(windows)]
@@ -27,6 +36,7 @@ struct UI {
     #[cfg(windows)]
     quick_install: quick_install::QuickInstall,
     nut: nut::Nut,
+    mailbox_scanner: mailbox_scanner::App,
 }
 
 #[derive(Clone)]
@@ -39,6 +49,7 @@ pub enum Site {
     Unicode,
     PathLengthChecker,
     Nut,
+    MailboxScanner,
 }
 
 #[derive(Clone)]
@@ -50,6 +61,7 @@ pub enum Message {
     #[cfg(windows)]
     QuickInstall(quick_install::Message),
     Nut(nut::Message),
+    MailboxScanner(mailbox_scanner::Message),
 }
 
 impl UI {
@@ -61,6 +73,7 @@ impl UI {
             #[cfg(windows)]
             quick_install: quick_install::QuickInstall::new(),
             nut: nut::Nut::new(),
+            mailbox_scanner: mailbox_scanner::App::default(),
         }
     }
 
@@ -76,6 +89,9 @@ impl UI {
                 Task::none()
             }
             Message::SwitchSite(site) => {
+                if self.mailbox_scanner.is_closing() {
+                    return Task::none();
+                }
                 self.site = site.clone();
 
                 self.path_length_checker.cancel_scan();
@@ -122,7 +138,9 @@ impl UI {
                         );
                         Task::none()
                     }
-                    Site::Home | Site::PathLengthChecker | Site::Nut => Task::none(),
+                    Site::Home | Site::PathLengthChecker | Site::Nut | Site::MailboxScanner => {
+                        Task::none()
+                    }
                 }
             }
             Message::Encoder(message) => self.encoder.update(message).map(Message::Encoder),
@@ -136,7 +154,22 @@ impl UI {
                 .update(message)
                 .map(Message::QuickInstall),
             Message::Nut(message) => self.nut.update(message).map(Message::Nut),
+            Message::MailboxScanner(message) => {
+                if matches!(message, mailbox_scanner::Message::CloseRequested) {
+                    self.site = Site::MailboxScanner;
+                    self.path_length_checker.cancel_scan();
+                }
+                self.mailbox_scanner
+                    .update(message)
+                    .map(Message::MailboxScanner)
+            }
         }
+    }
+
+    fn subscription(&self) -> iced::Subscription<Message> {
+        self.mailbox_scanner
+            .subscription()
+            .map(Message::MailboxScanner)
     }
 
     pub fn view(&self) -> iced::Element<'_, Message> {
@@ -150,7 +183,8 @@ impl UI {
                         button("Base64 Encode").on_press(Site::Base64),
                         button("Unicode Encode").on_press(Site::Unicode),
                         button("Path Length Checker").on_press(Site::PathLengthChecker),
-                        button("NUT Client").on_press(Site::Nut)
+                        button("NUT Client").on_press(Site::Nut),
+                        button("Mailbox cleanup").on_press(Site::MailboxScanner)
                     ]
                     .spacing(10)
                     .height(Length::Fill)
@@ -172,6 +206,8 @@ impl UI {
                         .view()
                         .map(Message::PathLengthChecker),
                     Site::Nut => self.nut.view().map(Message::Nut),
+                    Site::MailboxScanner =>
+                        self.mailbox_scanner.view().map(Message::MailboxScanner),
                 }
             ]
             .spacing(20)
@@ -195,6 +231,7 @@ pub enum Link {
 }
 
 const FONT_SIZE: f32 = 14.0;
+
 fn footer<'a>() -> iced::Element<'a, Link> {
     use iced::widget::*;
     let text = |content| text(content).font(Font::MONOSPACE).size(FONT_SIZE);
@@ -225,4 +262,43 @@ fn footer<'a>() -> iced::Element<'a, Link> {
     .spacing(7)
     .align_y(Vertical::Center)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mailbox_results_survive_navigation_to_another_tool() {
+        let mut app = UI::boot();
+        app.mailbox_scanner = mailbox_scanner::App::preview_scan();
+        app.site = Site::MailboxScanner;
+        let mut ui =
+            iced_test::Simulator::with_size(iced::Settings::default(), (1400.0, 850.0), app.view());
+        ui.click("Select page").unwrap();
+        let messages: Vec<_> = ui.into_messages().collect();
+        let _ = app.update(Message::SwitchSite(Site::Base64));
+        for message in messages {
+            let _ = app.update(message);
+        }
+        assert!(matches!(app.site, Site::Base64));
+        let _ = app.update(Message::SwitchSite(Site::MailboxScanner));
+        let mut ui =
+            iced_test::Simulator::with_size(iced::Settings::default(), (1400.0, 850.0), app.view());
+        assert!(ui.find("Download & purge selected (3)").is_ok());
+    }
+
+    #[test]
+    fn closing_from_another_tool_routes_to_mailbox_cleanup() {
+        let mut app = UI::boot();
+        app.mailbox_scanner = mailbox_scanner::App::preview_scan();
+        app.site = Site::Base64;
+        let _ = app.update(Message::MailboxScanner(
+            mailbox_scanner::Message::CloseRequested,
+        ));
+        assert!(matches!(app.site, Site::MailboxScanner));
+        assert!(app.mailbox_scanner.is_closing());
+        let _ = app.update(Message::SwitchSite(Site::Nut));
+        assert!(matches!(app.site, Site::MailboxScanner));
+    }
 }

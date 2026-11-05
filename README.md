@@ -16,6 +16,27 @@ This is a small collection of useful tools as a simple to download and run execu
 
 # tools
 
+## Publishing a release
+
+Push a tag beginning with `v` to build and publish the Windows x86_64 executable automatically:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+GitHub Actions creates a release with generated notes and attaches `toolbox-v0.1.0-windows-x86_64.exe`. The tag determines the release name; it does not need to match the package version in `Cargo.toml`.
+
+## Mailbox cleanup
+
+Download and scan mail from every selectable IMAP folder using an installed Windows Defender or Avast Business CLI. Configure temporary scan and quarantine folders, account settings, scanner path and 1–16 parallel scans. The scanner keeps running when you switch to another toolbox view.
+
+Scanning never deletes upstream messages. Review detections by sender and subject, then explicitly download an EML to quarantine, or download and purge the selected message. Purging requires a freshly verified local copy and server support for targeted UID expunge. Passwords stay in memory only. Closing the toolbox waits for scanner cleanup and presents any unresolved cleanup or deletion state for review.
+
+Messages and individual decoded MIME parts are limited to 200 MiB; total decoded content is limited to 400 MiB per message. Unsupported, malformed or encrypted content is reported as incomplete. A clean result does not guarantee the absence of malware. Avast CLI integration requires installation-specific testing; Defender output classification currently supports English output.
+
+Mailbox scanner code is MIT licensed, Copyright (c) 2026 Luca Wlcek.
+
 ## quick install (windows only)
 
 The quick install is basically the same as ninite or other quick install tools.
