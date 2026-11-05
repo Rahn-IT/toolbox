@@ -147,13 +147,13 @@ impl State {
         let folders = column![
             text("1  Working folders").size(21),
             path_field(
-                "Scan folder — temporary EML files",
+                "Scan folder",
                 &self.scan_dir,
                 Message::ScanDir,
                 Browse::Scan
             ),
             path_field(
-                "Quarantine folder — messages you choose to save",
+                "Quarantine folder",
                 &self.quarantine_dir,
                 Message::QuarantineDir,
                 Browse::Quarantine
@@ -195,19 +195,21 @@ impl State {
             ]
             .spacing(16),
             path_field(
-                "Scanner executable (optional — otherwise auto-detect)",
+                "Scanner executable (auto-detect if empty)",
                 &self.executable,
                 Message::Executable,
                 Browse::Executable
             ),
         ]
         .spacing(12);
-        let body = column![
-            text("Mailbox Scanner").size(32),
-            text("Find detectable threats across all IMAP folders. Review detections before downloading or purging."),
-            folders, account, scanner,
-        ].spacing(26);
-        let mut footer = column![button("Start scan").on_press(Message::Start).padding([12, 24]), text("Scanning does not delete upstream mail. Download & purge is a separate action after review.").size(13)].spacing(8);
+        let body =
+            column![text("Mailbox Scanner").size(32), folders, account, scanner,].spacing(26);
+        let mut footer = column![
+            button("Start scan")
+                .on_press(Message::Start)
+                .padding([12, 24])
+        ]
+        .spacing(8);
         if let Some(error) = &self.error {
             footer = footer.push(text(error).color(iced::Color::from_rgb8(240, 100, 100)));
         }

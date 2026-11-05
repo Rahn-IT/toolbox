@@ -184,7 +184,7 @@ impl UI {
                         button("Unicode Encode").on_press(Site::Unicode),
                         button("Path Length Checker").on_press(Site::PathLengthChecker),
                         button("NUT Client").on_press(Site::Nut),
-                        button("Mailbox cleanup").on_press(Site::MailboxScanner)
+                        button("Mailbox scanner").on_press(Site::MailboxScanner)
                     ]
                     .spacing(10)
                     .height(Length::Fill)

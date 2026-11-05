@@ -652,17 +652,25 @@ impl State {
         let title = row![
             column![
                 text("Mailbox Scanner").size(27),
-                text(format!(
-                    "{} @ {} · {} · up to {} parallel scans",
-                    self.settings.username(),
-                    self.settings.host(),
-                    self.settings.backend(),
-                    self.settings.parallel()
-                ))
-                .size(13)
+                row![
+                    text(format!(
+                        "{} @ {}",
+                        self.settings.username(),
+                        self.settings.host()
+                    ))
+                    .size(13)
+                    .width(Length::Fill),
+                    text(format!("Scanner: {}", self.settings.backend()))
+                        .size(13)
+                        .width(Length::Fill),
+                    text(format!("Parallel scans: {}", self.settings.parallel()))
+                        .size(13)
+                        .width(Length::Fill),
+                ]
+                .spacing(16)
             ]
-            .spacing(4),
-            space().width(Length::Fill),
+            .spacing(4)
+            .width(Length::Fill),
             button("Back to setup")
                 .on_press_maybe((!self.busy() && !self.closing).then_some(Message::Back)),
         ]
@@ -695,11 +703,47 @@ impl State {
         })
         .on_press_maybe((scanning && !self.stopping).then_some(Message::StopScan));
         let summary = column![
-            row![text(status).size(18), space().width(Length::Fill), stop].align_y(iced::Alignment::Center),
-            text(self.folder.as_deref().unwrap_or("All selectable IMAP folders")).size(13),
+            row![text(status).size(18), space().width(Length::Fill), stop]
+                .align_y(iced::Alignment::Center),
+            text(
+                self.folder
+                    .as_deref()
+                    .unwrap_or("All selectable IMAP folders")
+            )
+            .size(13),
             progress_bar(0.0..=1.0, progress),
-            text(format!("{} / {} processed · {} active scans · {} buffered · {} detected · {} incomplete · {} vanished · {} unprocessed/cancelled", self.counts.processed, self.counts.total, self.counts.active, self.counts.queued, self.counts.detected, self.counts.incomplete, self.counts.vanished, self.counts.cancelled)).size(13),
-        ].spacing(8);
+            row![
+                text(format!("Processed: {}", self.counts.processed))
+                    .size(13)
+                    .width(Length::Fill),
+                text(format!("Total: {}", self.counts.total))
+                    .size(13)
+                    .width(Length::Fill),
+                text(format!("Active scans: {}", self.counts.active))
+                    .size(13)
+                    .width(Length::Fill),
+                text(format!("Buffered: {}", self.counts.queued))
+                    .size(13)
+                    .width(Length::Fill),
+            ]
+            .spacing(16),
+            row![
+                text(format!("Detected: {}", self.counts.detected))
+                    .size(13)
+                    .width(Length::Fill),
+                text(format!("Incomplete: {}", self.counts.incomplete))
+                    .size(13)
+                    .width(Length::Fill),
+                text(format!("Vanished: {}", self.counts.vanished))
+                    .size(13)
+                    .width(Length::Fill),
+                text(format!("Unprocessed/cancelled: {}", self.counts.cancelled))
+                    .size(13)
+                    .width(Length::Fill),
+            ]
+            .spacing(16),
+        ]
+        .spacing(8);
 
         let mut table = column![
             row![
@@ -715,11 +759,14 @@ impl State {
         .spacing(10)
         .width(Length::Fixed(1090.0));
         if self.rows.is_empty() {
-            table = table.push(container(text(if scanning {
-                "Detected messages will appear here. Scanning never purges mail automatically."
-            } else {
-                "No detections were reported. Check the final status and diagnostics for incomplete scans."
-            })).padding(24));
+            table = table.push(
+                container(text(if scanning {
+                    "No detections yet."
+                } else {
+                    "No detections."
+                }))
+                .padding(24),
+            );
         }
         for finding in self.rows.iter().skip(self.page * PAGE_SIZE).take(PAGE_SIZE) {
             table = table.push(self.finding_view(finding, actions_enabled));
@@ -776,9 +823,9 @@ impl State {
             )
             .spacing(12)
             .align_y(iced::Alignment::Center);
-        let mut content = column![title, summary, list, navigation, batch,
-            text("Download keeps mail upstream. Download & purge saves a fresh verified copy, then permanently removes only the selected mail.").size(12),
-        ].spacing(14).height(Length::Fill);
+        let mut content = column![title, summary, list, navigation, batch]
+            .spacing(14)
+            .height(Length::Fill);
         let diagnostic_count = self.diagnostics.len() as u64 + self.omitted_diagnostics;
         let leftover_count = self.leftovers.len() as u64 + self.omitted_leftovers;
         if diagnostic_count > 0 || leftover_count > 0 {
