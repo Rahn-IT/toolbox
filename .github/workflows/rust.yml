@@ -25,13 +25,13 @@ jobs:
       - name: Build release binary for Windows
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
-        run: cargo build --release --locked --package toolbox --bin toolbox --target x86_64-pc-windows-msvc
+        run: cargo build --release --locked --package toolbox --bin toolbox
 
       - name: Name release binary
         shell: pwsh
         env:
           RELEASE_TAG: ${{ github.ref_name }}
-        run: Copy-Item -LiteralPath target/x86_64-pc-windows-msvc/release/toolbox.exe -Destination "toolbox-$env:RELEASE_TAG-windows-x86_64.exe"
+        run: Copy-Item -LiteralPath target/release/toolbox.exe -Destination "toolbox-$env:RELEASE_TAG-windows-x86_64.exe"
 
       - name: Create GitHub release
         shell: pwsh
