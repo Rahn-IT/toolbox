@@ -61,6 +61,7 @@ struct Pending {
     subject: String,
     sender: String,
     work: PathBuf,
+    files: Vec<PathBuf>,
     report: detection::Report,
 }
 
@@ -212,21 +213,7 @@ async fn execute(
             };
             match fetched {
                 Ok(bytes) => {
-                    let work = match unique_directory(&session, "job") {
-                        Ok(work) => work,
-                        Err(error) => {
-                            partial = true;
-                            counts.processed += 1;
-                            counts.incomplete += 1;
-                            let _ = events
-                                .send(event::Event::Diagnostic {
-                                    context: snapshot.folder.display().into(),
-                                    detail: error.to_string(),
-                                })
-                                .await;
-                            continue;
-                        }
-                    };
+                    let work = unique_path(&session, "mail").with_extension("eml");
                     let pending = {
                         let write = stage(identity, bytes, work);
                         tokio::pin!(write);
@@ -332,7 +319,7 @@ async fn execute(
     // Buffered mail is not scanned after cancellation or the detection cap.
     // Its files still belong to this session and must be removed before Finished.
     while let Some(pending) = queue.pop_front() {
-        for path in cleanup(&pending.work).await {
+        for path in cleanup(&pending.files).await {
             partial = true;
             let _ = events.send(event::Event::Leftover(path)).await;
         }
@@ -395,7 +382,8 @@ fn progress(events: &mpsc::Sender<event::Event>, counts: &event::Counts) {
 
 async fn stage(identity: message::Identity, bytes: Vec<u8>, work: PathBuf) -> Pending {
     let (subject, sender) = metadata(&bytes);
-    let path = work.join("message.eml");
+    let path = &work;
+    let mut files = Vec::new();
     let mut report = detection::Report::new();
     match tokio::fs::OpenOptions::new()
         .write(true)
@@ -404,6 +392,7 @@ async fn stage(identity: message::Identity, bytes: Vec<u8>, work: PathBuf) -> Pe
         .await
     {
         Ok(mut file) => {
+            files.push(work.clone());
             use tokio::io::AsyncWriteExt;
             let written = async {
                 file.write_all(&bytes).await?;
@@ -425,6 +414,7 @@ async fn stage(identity: message::Identity, bytes: Vec<u8>, work: PathBuf) -> Pe
         subject,
         sender,
         work,
+        files,
         report,
     }
 }
@@ -435,15 +425,16 @@ async fn scan_job(pending: Pending, engine: scanner::Engine, cancel: watch::Rece
         subject,
         sender,
         work,
+        mut files,
         mut report,
     } = pending;
     if report.complete() {
-        match engine.scan(&work.join("message.eml"), &work, cancel).await {
+        match engine.scan(&work, &mut files, cancel).await {
             Ok(found) => report.merge(found),
             Err(error) => report.warn(detection::Issue::Scanner(error.to_string())),
         }
     }
-    let leftovers = cleanup(&work).await;
+    let leftovers = cleanup(&files).await;
     if !leftovers.is_empty() {
         report.warn(detection::Issue::Input(
             "Some temporary files could not be removed".into(),
@@ -458,20 +449,15 @@ async fn scan_job(pending: Pending, engine: scanner::Engine, cancel: watch::Rece
     }
 }
 
-async fn cleanup(work: &Path) -> Vec<PathBuf> {
+async fn cleanup(files: &[PathBuf]) -> Vec<PathBuf> {
+    // Jobs share a directory: remove only paths successfully created by this job.
     let mut leftovers = Vec::new();
-    match tokio::fs::read_dir(&work).await {
-        Ok(mut entries) => {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if tokio::fs::remove_file(entry.path()).await.is_err() {
-                    leftovers.push(entry.path());
-                }
-            }
+    for path in files {
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => leftovers.push(path.clone()),
         }
-        Err(_) => leftovers.push(work.to_path_buf()),
-    }
-    if tokio::fs::remove_dir(&work).await.is_err() && leftovers.is_empty() {
-        leftovers.push(work.to_path_buf());
     }
     leftovers
 }
@@ -682,22 +668,26 @@ fn prepare(directory: &Path) -> Result<PathBuf, Error> {
 }
 
 fn unique_directory(parent: &Path, prefix: &str) -> Result<PathBuf, Error> {
-    let time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
     loop {
-        let path = parent.join(format!(
-            "{prefix}-{}-{time}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        let path = unique_path(parent, prefix);
         match std::fs::create_dir(&path) {
             Ok(()) => return Ok(path),
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(source) => return Err(Error::Io { path, source }),
         }
     }
+}
+
+fn unique_path(parent: &Path, prefix: &str) -> PathBuf {
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    parent.join(format!(
+        "{prefix}-{}-{time}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
 }
 
 async fn cancelled(cancel: &mut watch::Receiver<bool>) {
@@ -765,6 +755,7 @@ mod tests {
             subject: String::new(),
             sender: String::new(),
             work,
+            files: Vec::new(),
             report: detection::Report::new(),
         }
     }
@@ -817,20 +808,46 @@ mod tests {
         let directory = unique_directory(&std::env::temp_dir(), "mailbox-buffer-test").unwrap();
         let mut queue = VecDeque::new();
         for uid in 1..=3 {
-            let work = unique_directory(&directory, "job").unwrap();
+            let work = unique_path(&directory, "mail").with_extension("eml");
             let identity = pending(uid, work.clone()).identity;
             let raw =
                 b"From: test@example.invalid\r\nSubject: buffered mail\r\n\r\nharmless".to_vec();
             queue.push_back(stage(identity, raw.clone(), work.clone()).await);
-            assert_eq!(
-                tokio::fs::read(work.join("message.eml")).await.unwrap(),
-                raw
-            );
+            assert_eq!(tokio::fs::read(&work).await.unwrap(), raw);
         }
+        assert!(
+            std::fs::read_dir(&directory).unwrap().all(|entry| entry
+                .unwrap()
+                .file_type()
+                .unwrap()
+                .is_file())
+        );
+        let unrelated = queue.front().unwrap().work.with_extension("99.bin");
+        std::fs::write(&unrelated, b"not owned by any job").unwrap();
         while let Some(pending) = queue.pop_front() {
-            assert!(cleanup(&pending.work).await.is_empty());
+            assert!(cleanup(&pending.files).await.is_empty());
             assert!(!pending.work.exists());
+            for other in &queue {
+                assert!(other.work.exists());
+            }
         }
+        assert_eq!(std::fs::read(&unrelated).unwrap(), b"not owned by any job");
+        std::fs::remove_file(unrelated).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn filename_collision_does_not_overwrite_or_delete_existing_mail() {
+        let directory = unique_directory(&std::env::temp_dir(), "mailbox-collision-test").unwrap();
+        let path = directory.join("existing.eml");
+        std::fs::write(&path, b"existing mail").unwrap();
+        let identity = pending(1, path.clone()).identity;
+        let pending = stage(identity, b"new mail".to_vec(), path.clone()).await;
+        assert!(!pending.report.complete());
+        assert!(pending.files.is_empty());
+        assert!(cleanup(&pending.files).await.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), b"existing mail");
+        std::fs::remove_file(path).unwrap();
         std::fs::remove_dir(directory).unwrap();
     }
 

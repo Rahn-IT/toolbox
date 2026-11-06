@@ -80,11 +80,11 @@ impl Engine {
         &self.executable
     }
 
-    /// Scan a bounded original EML and its decoded MIME leaves in a job-owned directory.
+    /// Scan an original EML and prefixed decoded parts, tracking files created for cleanup.
     pub async fn scan(
         &self,
         eml: &Path,
-        work: &Path,
+        files: &mut Vec<PathBuf>,
         cancel: watch::Receiver<bool>,
     ) -> Result<detection::Report, Error> {
         let mut report = detection::Report::new();
@@ -93,13 +93,6 @@ impl Engine {
             return Ok(report);
         }
         let eml = tokio::fs::canonicalize(eml).await?;
-        let work = tokio::fs::canonicalize(work).await?;
-        if !eml.starts_with(&work) {
-            report.warn(detection::Issue::Input(
-                "Scanner input is outside its job directory".into(),
-            ));
-            return Ok(report);
-        }
         let metadata = tokio::fs::metadata(&eml).await?;
         if !metadata.is_file() || metadata.len() > mime::MAX_ORIGINAL as u64 {
             report.warn(detection::Issue::Limit(
@@ -156,7 +149,7 @@ impl Engine {
             }
             let Some(bytes) = leaf.bytes else { continue };
             index += 1;
-            let path = work.join(format!("{index}.bin"));
+            let path = eml.with_extension(format!("{index}.bin"));
             let mut file = match tokio::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -172,6 +165,7 @@ impl Engine {
                     break;
                 }
             };
+            files.push(path.clone());
             let write = async {
                 use tokio::io::AsyncWriteExt;
                 file.write_all(&bytes).await?;
@@ -652,7 +646,7 @@ mod tests {
                                 "Decoded test leaf write blocked: {error}; direct positive integration remains unverified"
                             ),
                         }
-                        match engine.scan(&path, &work, cancel).await {
+                        match engine.scan(&path, &mut Vec::new(), cancel).await {
                             Ok(report) => {
                                 eprintln!(
                                     "Full MIME pipeline detected={}, complete={}, evidence={:?}, issues={:?}",
