@@ -233,6 +233,8 @@ Do not claim validation that was not actually performed.
 
 ## 13. Documentation and comments
 
+Do not edit `README.md`.
+
 Prefer code that is understandable without excessive commentary.
 
 Add comments where they explain:

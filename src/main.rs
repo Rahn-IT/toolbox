@@ -28,6 +28,8 @@ pub mod nut;
 pub mod path_length_checker;
 #[cfg(windows)]
 pub mod quick_install;
+#[cfg(windows)]
+pub mod quick_tools;
 
 struct UI {
     site: Site,
@@ -35,6 +37,8 @@ struct UI {
     path_length_checker: path_length_checker::PathLengthChecker,
     #[cfg(windows)]
     quick_install: quick_install::QuickInstall,
+    #[cfg(windows)]
+    quick_tools: quick_tools::State,
     nut: nut::Nut,
     mailbox_scanner: mailbox_scanner::App,
 }
@@ -44,6 +48,8 @@ pub enum Site {
     Home,
     #[cfg(windows)]
     QuickInstall,
+    #[cfg(windows)]
+    QuickTools,
     Eml,
     Base64,
     Unicode,
@@ -60,6 +66,8 @@ pub enum Message {
     PathLengthChecker(path_length_checker::Message),
     #[cfg(windows)]
     QuickInstall(quick_install::Message),
+    #[cfg(windows)]
+    QuickTools(quick_tools::Message),
     Nut(nut::Message),
     MailboxScanner(mailbox_scanner::Message),
 }
@@ -72,6 +80,8 @@ impl UI {
             path_length_checker: path_length_checker::PathLengthChecker::new(),
             #[cfg(windows)]
             quick_install: quick_install::QuickInstall::new(),
+            #[cfg(windows)]
+            quick_tools: quick_tools::State::default(),
             nut: nut::Nut::new(),
             mailbox_scanner: mailbox_scanner::App::default(),
         }
@@ -97,6 +107,8 @@ impl UI {
                 self.path_length_checker.cancel_scan();
                 match site {
                     Site::QuickInstall => Task::none(),
+                    #[cfg(windows)]
+                    Site::QuickTools => Task::none(),
                     Site::Eml => {
                         self.site = Site::Eml;
                         self.encoder.set_encoding(eml::qp_encode, eml::qp_decode);
@@ -154,6 +166,10 @@ impl UI {
                 .update(message)
                 .map(Message::QuickInstall),
             Message::Nut(message) => self.nut.update(message).map(Message::Nut),
+            #[cfg(windows)]
+            Message::QuickTools(message) => {
+                self.quick_tools.update(message).map(Message::QuickTools)
+            }
             Message::MailboxScanner(message) => {
                 if matches!(message, mailbox_scanner::Message::CloseRequested) {
                     self.site = Site::MailboxScanner;
@@ -179,6 +195,8 @@ impl UI {
                     column![
                         #[cfg(windows)]
                         button("Quick Install").on_press(Site::QuickInstall),
+                        #[cfg(windows)]
+                        button("Quick Tools").on_press(Site::QuickTools),
                         button("EML Encode").on_press(Site::Eml),
                         button("Base64 Encode").on_press(Site::Base64),
                         button("Unicode Encode").on_press(Site::Unicode),
@@ -195,6 +213,8 @@ impl UI {
                     Site::Home => "Toolbox".into(),
                     #[cfg(windows)]
                     Site::QuickInstall => self.quick_install.view().map(Message::QuickInstall),
+                    #[cfg(windows)]
+                    Site::QuickTools => self.quick_tools.view().map(Message::QuickTools),
                     Site::Eml => self
                         .encoder
                         .view("Encoder for qouted printable encoding in EML files")
