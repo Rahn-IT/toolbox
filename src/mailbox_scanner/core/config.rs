@@ -39,10 +39,8 @@ pub struct Draft {
     pub scan_dir: PathBuf,
     /// Parent directory for deliberately preserved EML output.
     pub quarantine_dir: PathBuf,
-    /// Selected installed engine.
-    pub backend: scanner::Backend,
-    /// Optional installed engine path override.
-    pub executable: Option<PathBuf>,
+    /// Scanner-specific settings for this run.
+    pub scanner: scanner::Settings,
     /// Editable number of concurrent message scans.
     pub parallel: String,
     /// Encrypted transport mode.
@@ -58,8 +56,7 @@ pub struct Settings {
     password: String,
     scan_dir: PathBuf,
     quarantine_dir: PathBuf,
-    backend: scanner::Backend,
-    executable: Option<PathBuf>,
+    scanner: scanner::Settings,
     parallel: NonZeroU8,
     tls: Tls,
 }
@@ -67,6 +64,9 @@ pub struct Settings {
 /// A setup field that cannot form valid settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
+    /// A selected scanner cannot form a valid command.
+    #[error(transparent)]
+    Scanner(#[from] scanner::Error),
     /// A host is absent or contains protocol control characters.
     #[error("Enter an IMAP hostname without control characters")]
     Host,
@@ -93,8 +93,7 @@ impl Default for Draft {
             password: String::new(),
             scan_dir: PathBuf::new(),
             quarantine_dir: PathBuf::new(),
-            backend: scanner::Backend::Defender,
-            executable: None,
+            scanner: scanner::Settings::default(),
             parallel: "4".into(),
             tls: Tls::Implicit,
         }
@@ -111,8 +110,7 @@ impl fmt::Debug for Draft {
             .field("password", &"[redacted]")
             .field("scan_dir", &self.scan_dir)
             .field("quarantine_dir", &self.quarantine_dir)
-            .field("backend", &self.backend)
-            .field("executable", &self.executable)
+            .field("scanner", &self.scanner)
             .field("parallel", &self.parallel)
             .field("tls", &self.tls)
             .finish()
@@ -129,8 +127,7 @@ impl fmt::Debug for Settings {
             .field("password", &"[redacted]")
             .field("scan_dir", &self.scan_dir)
             .field("quarantine_dir", &self.quarantine_dir)
-            .field("backend", &self.backend)
-            .field("executable", &self.executable)
+            .field("scanner", &self.scanner)
             .field("parallel", &self.parallel)
             .field("tls", &self.tls)
             .finish()
@@ -168,6 +165,7 @@ impl TryFrom<Draft> for Settings {
         if parallel.get() > 16 {
             return Err(Error::Parallel);
         }
+        draft.scanner.validate()?;
         Ok(Self {
             host: host.into(),
             port,
@@ -175,8 +173,7 @@ impl TryFrom<Draft> for Settings {
             password: draft.password,
             scan_dir: draft.scan_dir,
             quarantine_dir: draft.quarantine_dir,
-            backend: draft.backend,
-            executable: draft.executable.filter(|path| !path.as_os_str().is_empty()),
+            scanner: draft.scanner,
             parallel,
             tls: draft.tls,
         })
@@ -216,12 +213,12 @@ impl Settings {
 
     /// The selected installed scanner engine.
     pub fn backend(&self) -> scanner::Backend {
-        self.backend
+        self.scanner.backend()
     }
 
-    /// Optional installed scanner path override.
-    pub fn executable(&self) -> Option<&Path> {
-        self.executable.as_deref()
+    /// Immutable scanner-specific configuration.
+    pub fn scanner(&self) -> &scanner::Settings {
+        &self.scanner
     }
 
     /// Maximum concurrent message scans.
@@ -297,5 +294,22 @@ mod tests {
         assert!(!format!("{input:?}").contains(" secret "));
         let settings = Settings::try_from(input).unwrap();
         assert!(!format!("{settings:?}").contains(" secret "));
+    }
+
+    #[test]
+    fn scanner_validation_is_part_of_run_validation() {
+        let mut input = draft();
+        input.scanner = crate::mailbox_scanner::core::scanner::Settings::Avast(
+            crate::mailbox_scanner::core::scanner::avast::Settings {
+                heuristics: 101,
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            Settings::try_from(input),
+            Err(Error::Scanner(
+                crate::mailbox_scanner::core::scanner::Error::Heuristics
+            ))
+        ));
     }
 }

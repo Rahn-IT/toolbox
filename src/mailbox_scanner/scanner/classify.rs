@@ -1,7 +1,8 @@
-//! Conservative interpretation of the two scanner command-line interfaces.
+//! Shared scanner capture finalization and bounded diagnostics.
 
 use std::path::Path;
 
+use super::{avast, custom, defender};
 use crate::mailbox_scanner::core::{detection, scanner};
 
 #[derive(Default)]
@@ -12,33 +13,25 @@ pub(super) struct Capture {
     pub truncated: bool,
     pub timed_out: bool,
     pub cancelled: bool,
+    pub termination_requested: bool,
     pub failure: Option<String>,
 }
 
 pub(super) fn report(
-    backend: scanner::Backend,
+    settings: &scanner::Settings,
     path: &Path,
     capture: Capture,
 ) -> detection::Report {
     let mut result = detection::Report::new();
-    match backend {
-        scanner::Backend::Avast => {
-            if capture.code == Some(1) {
-                result.record(detection::Evidence {
-                    backend,
-                    threat: "Avast detected a threat".into(),
-                });
-            } else if capture.code != Some(0) {
-                result.warn(detection::Issue::Scanner(format!(
-                    "Avast did not complete successfully (exit {:?})",
-                    capture.code
-                )));
-            }
-            if !capture.stderr.is_empty() {
-                result.warn(detection::Issue::Scanner(diagnostic(&capture.stderr)));
-            }
-        }
-        scanner::Backend::Defender => defender(path, &capture, &mut result),
+    match settings {
+        scanner::Settings::Avast(_) => avast::report(&capture, &mut result),
+        scanner::Settings::Defender => defender::report(path, &capture, &mut result),
+        scanner::Settings::Custom(settings) => custom::report(settings, &capture, &mut result),
+    }
+    if capture.termination_requested {
+        result.warn(detection::Issue::Scanner(
+            "Scanner termination was requested; exit code does not establish completion".into(),
+        ));
     }
     if capture.truncated {
         result.warn(detection::Issue::Limit(
@@ -57,109 +50,7 @@ pub(super) fn report(
     result
 }
 
-fn defender(path: &Path, capture: &Capture, result: &mut detection::Report) {
-    let stdout = match decode(&capture.stdout) {
-        Ok(text) => text,
-        Err(()) => {
-            result.warn(detection::Issue::Scanner(
-                "Unsupported Defender output encoding; scan result could not be established".into(),
-            ));
-            // Preserve complete positive lines preceding a damaged/truncated tail.
-            // A decode problem always leaves coverage incomplete, never a clean result.
-            valid_prefix(&capture.stdout)
-        }
-    };
-    let stderr = match decode(&capture.stderr) {
-        Ok(text) => text,
-        Err(()) => {
-            result.warn(detection::Issue::Scanner(
-                "Unsupported Defender diagnostic encoding".into(),
-            ));
-            String::new()
-        }
-    };
-    let path = path.to_string_lossy();
-    let prefix = format!("Scanning {path} found ");
-    let mut summaries = Vec::new();
-    let mut in_threat_list = false;
-    let mut threats = Vec::new();
-    let mut finished = false;
-    let mut errors = !stderr.trim().is_empty();
-    for raw in stdout.lines() {
-        let line = raw.trim();
-        if line == "Scan finished." {
-            finished = true;
-        }
-        if let Some(summary) = line.strip_prefix(&prefix) {
-            let count = if summary == "no threats." {
-                Some(0)
-            } else {
-                summary
-                    .strip_suffix(" threats.")
-                    .or_else(|| summary.strip_suffix(" threat."))
-                    .and_then(|count| count.parse::<u32>().ok())
-            };
-            if let Some(count) = count {
-                summaries.push(count);
-            }
-        }
-        if line == "LIST OF DETECTED THREATS"
-            || line
-                .strip_prefix('<')
-                .and_then(|line| line.strip_suffix('>'))
-                .is_some_and(|line| line.trim_matches('=').trim() == "LIST OF DETECTED THREATS")
-        {
-            in_threat_list = true;
-        }
-        if in_threat_list
-            && let Some((field, value)) = line.split_once(':')
-            && field.trim() == "Threat"
-            && !value.trim().is_empty()
-        {
-            threats.push(value.trim().to_owned());
-        }
-        if line.starts_with("ERROR:") || line.starts_with("CmdTool: Failed") {
-            errors = true;
-        }
-    }
-    let positive = summaries.iter().any(|count| *count > 0) && !threats.is_empty();
-    if positive {
-        for threat in threats {
-            result.record(detection::Evidence {
-                backend: scanner::Backend::Defender,
-                threat,
-            });
-        }
-        if capture.code != Some(2)
-            || errors
-            || !finished
-            || summaries.len() != 1
-            || summaries[0] == 0
-        {
-            result.warn(detection::Issue::Scanner(
-                "Defender reported a detection but scan completion or coverage is uncertain".into(),
-            ));
-        }
-    } else if capture.code != Some(0)
-        || !finished
-        || errors
-        || summaries != [0]
-        || !threats.is_empty()
-    {
-        let excerpt = if stderr.trim().is_empty() {
-            &stdout
-        } else {
-            &stderr
-        };
-        result.warn(detection::Issue::Scanner(format!(
-            "Defender result is unrecognized or unsuccessful (exit {:?}): {}",
-            capture.code,
-            excerpt.chars().take(400).collect::<String>()
-        )));
-    }
-}
-
-fn decode(bytes: &[u8]) -> Result<String, ()> {
+pub(super) fn decode(bytes: &[u8]) -> Result<String, ()> {
     if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe]) {
         if bytes.len() % 2 != 0 {
             return Err(());
@@ -179,7 +70,7 @@ fn decode(bytes: &[u8]) -> Result<String, ()> {
     }
 }
 
-fn valid_prefix(bytes: &[u8]) -> String {
+pub(super) fn valid_prefix(bytes: &[u8]) -> String {
     if let Some(bytes) = bytes.strip_prefix(&[0xff, 0xfe]) {
         let units = bytes
             .as_chunks::<2>()
@@ -200,7 +91,7 @@ fn valid_prefix(bytes: &[u8]) -> String {
     }
 }
 
-fn diagnostic(bytes: &[u8]) -> String {
+pub(super) fn diagnostic(bytes: &[u8]) -> String {
     match decode(bytes) {
         Ok(text) => text.chars().take(400).collect(),
         Err(()) => "Scanner wrote unsupported diagnostic output".into(),
@@ -223,7 +114,7 @@ mod tests {
     #[test]
     fn defender_exit_two_without_positive_evidence_is_incomplete() {
         let report = report(
-            scanner::Backend::Defender,
+            &scanner::Settings::Defender,
             Path::new("test.eml"),
             defender_capture(2, "CmdTool: Failed with hr = 0x80070005"),
         );
@@ -238,7 +129,7 @@ mod tests {
             "Scan finished.\nScanning test.eml found 1 threats.\nLIST OF DETECTED THREATS\nThreat : Test:Example\n",
         );
         capture.timed_out = true;
-        let report = report(scanner::Backend::Defender, Path::new("test.eml"), capture);
+        let report = report(&scanner::Settings::Defender, Path::new("test.eml"), capture);
         assert!(report.detected());
         assert!(!report.complete());
     }
@@ -249,7 +140,7 @@ mod tests {
             2,
             "Scanning another.eml found 1 threats.\nLIST OF DETECTED THREATS\nThreat : Test:Example\n",
         );
-        let report = report(scanner::Backend::Defender, Path::new("test.eml"), capture);
+        let report = report(&scanner::Settings::Defender, Path::new("test.eml"), capture);
         assert!(!report.detected());
         assert!(!report.complete());
     }
@@ -257,7 +148,7 @@ mod tests {
     #[test]
     fn success_requires_a_matching_zero_threat_summary() {
         let report = report(
-            scanner::Backend::Defender,
+            &scanner::Settings::Defender,
             Path::new("test.eml"),
             defender_capture(0, "Scan finished.\nScanning test.eml found no threats.\n"),
         );
@@ -273,7 +164,7 @@ mod tests {
             0,
             "Scan starting...\r\nScan finished.\r\nScanning \\\\?\\D:\\mailbox-scanner\\target\\scanner-benign.eml found no threats.\r\n",
         );
-        let result = report(scanner::Backend::Defender, path, capture);
+        let result = report(&scanner::Settings::Defender, path, capture);
         assert!(!result.detected());
         assert!(result.complete());
     }
@@ -296,7 +187,7 @@ mod tests {
             "\r\n-------------------------------------------------------------------------------\r\n",
         );
         let result = report(
-            scanner::Backend::Defender,
+            &scanner::Settings::Defender,
             path,
             defender_capture(2, output),
         );
@@ -317,7 +208,7 @@ mod tests {
     #[test]
     fn avast_errors_are_not_detections() {
         let report = report(
-            scanner::Backend::Avast,
+            &scanner::Settings::Avast(scanner::avast::Settings::default()),
             Path::new("test.eml"),
             Capture {
                 code: Some(5),
@@ -331,7 +222,7 @@ mod tests {
     #[test]
     fn contradictory_zero_summary_does_not_hide_a_threat_field() {
         let report = report(
-            scanner::Backend::Defender,
+            &scanner::Settings::Defender,
             Path::new("test.eml"),
             defender_capture(
                 0,
@@ -345,7 +236,7 @@ mod tests {
     #[test]
     fn avast_detection_survives_an_output_problem() {
         let report = report(
-            scanner::Backend::Avast,
+            &scanner::Settings::Avast(scanner::avast::Settings::default()),
             Path::new("test.eml"),
             Capture {
                 code: Some(1),
@@ -365,7 +256,115 @@ mod tests {
         );
         capture.stdout.push(0xff);
         capture.truncated = true;
-        let result = report(scanner::Backend::Defender, Path::new("test.eml"), capture);
+        let result = report(&scanner::Settings::Defender, Path::new("test.eml"), capture);
+        assert!(result.detected());
+        assert!(!result.complete());
+    }
+
+    fn custom_settings() -> scanner::Settings {
+        scanner::Settings::Custom(scanner::custom::Settings {
+            executable: std::env::current_exe().unwrap(),
+            arguments: vec!["{file}".into()],
+            clean_code: 0,
+            detected_code: 1,
+        })
+    }
+
+    #[test]
+    fn custom_normal_exit_codes_and_stderr_are_interpreted_conservatively() {
+        for (code, detected, complete) in [
+            (Some(0), false, true),
+            (Some(1), true, true),
+            (Some(7), false, false),
+            (None, false, false),
+        ] {
+            let result = report(
+                &custom_settings(),
+                Path::new("mail.eml"),
+                Capture {
+                    code,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(result.detected(), detected);
+            assert_eq!(result.complete(), complete);
+        }
+        let result = report(
+            &custom_settings(),
+            Path::new("mail.eml"),
+            Capture {
+                code: Some(0),
+                stderr: b"scanner warning".to_vec(),
+                ..Default::default()
+            },
+        );
+        assert!(!result.complete());
+        assert!(!result.detected());
+    }
+
+    #[test]
+    fn forced_termination_codes_are_neither_clean_nor_positive() {
+        for settings in [
+            custom_settings(),
+            scanner::Settings::Avast(scanner::avast::Settings::default()),
+        ] {
+            for code in [0, 1] {
+                let result = report(
+                    &settings,
+                    Path::new("mail.eml"),
+                    Capture {
+                        code: Some(code),
+                        termination_requested: true,
+                        ..Default::default()
+                    },
+                );
+                assert!(!result.detected());
+                assert!(!result.complete());
+            }
+        }
+    }
+
+    #[test]
+    fn normal_custom_detection_survives_later_coverage_issues() {
+        for capture in [
+            Capture {
+                truncated: true,
+                ..Default::default()
+            },
+            Capture {
+                timed_out: true,
+                ..Default::default()
+            },
+            Capture {
+                cancelled: true,
+                ..Default::default()
+            },
+            Capture {
+                failure: Some("pipe failed".into()),
+                ..Default::default()
+            },
+        ] {
+            let result = report(
+                &custom_settings(),
+                Path::new("mail.eml"),
+                Capture {
+                    code: Some(1),
+                    ..capture
+                },
+            );
+            assert!(result.detected());
+            assert!(!result.complete());
+        }
+    }
+
+    #[test]
+    fn defender_text_evidence_survives_forced_termination() {
+        let mut capture = defender_capture(
+            1,
+            "Scan finished.\nScanning mail.eml found 1 threats.\nLIST OF DETECTED THREATS\nThreat : Test:Example\n",
+        );
+        capture.termination_requested = true;
+        let result = report(&scanner::Settings::Defender, Path::new("mail.eml"), capture);
         assert!(result.detected());
         assert!(!result.complete());
     }

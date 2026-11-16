@@ -1,6 +1,9 @@
-//! Direct, bounded execution of the two supported installed antivirus CLIs.
+//! Direct, bounded execution of installed antivirus command-line scanners.
 
+mod avast;
 mod classify;
+mod custom;
+mod defender;
 mod mime;
 
 use std::io;
@@ -23,13 +26,15 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 /// A selected installed command-line engine. The backend set is deliberately closed.
 #[derive(Clone)]
 pub struct Engine {
-    backend: scanner::Backend,
+    settings: scanner::Settings,
     executable: PathBuf,
 }
 
 /// Failures before a scan report can be established.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Settings(#[from] scanner::Error),
     #[error("Selected scanner is unavailable on this platform")]
     Platform,
     #[error("Scanner executable not found: {0}")]
@@ -45,34 +50,28 @@ enum Output {
 }
 
 impl Engine {
-    /// Resolve an explicit executable override or the engine's standard installation.
+    /// Resolve the standard installation or a validated Custom executable.
     pub fn resolve(settings: &config::Settings) -> Result<Self, Error> {
         if !cfg!(windows) {
             return Err(Error::Platform);
         }
-        let executable = if let Some(path) = settings.executable() {
-            path.to_path_buf()
-        } else {
-            match settings.backend() {
-                scanner::Backend::Avast => program_files()
-                    .join("AVAST Software")
-                    .join("Avast")
-                    .join("ashCmd.exe"),
-                scanner::Backend::Defender => defender_executable(),
-            }
+        let executable = match settings.scanner() {
+            scanner::Settings::Avast(_) => avast::executable(),
+            scanner::Settings::Defender => defender::executable(),
+            scanner::Settings::Custom(settings) => custom::executable(settings)?,
         };
         if !executable.is_file() {
             return Err(Error::Executable(executable));
         }
         Ok(Self {
-            backend: settings.backend(),
+            settings: settings.scanner().clone(),
             executable: executable.canonicalize()?,
         })
     }
 
     /// The selected closed backend.
     pub fn backend(&self) -> scanner::Backend {
-        self.backend
+        self.settings.backend()
     }
 
     /// The resolved executable path.
@@ -216,7 +215,7 @@ impl Engine {
         )
         .await
         {
-            Ok(capture) => classify::report(self.backend, path, capture),
+            Ok(capture) => classify::report(&self.settings, path, capture),
             Err(error) => {
                 let mut report = detection::Report::new();
                 report.warn(detection::Issue::Scanner(format!(
@@ -239,20 +238,13 @@ impl Engine {
     }
 
     fn command(&self, path: &Path) -> Command {
-        let mut command = Command::new(&self.executable);
-        match self.backend {
-            scanner::Backend::Avast => {
-                command
-                    .arg(path)
-                    .args(["/_", "/a", "/c", "/t=A", "/p=4", "/s"]);
+        let mut command = match &self.settings {
+            scanner::Settings::Avast(settings) => avast::command(&self.executable, path, settings),
+            scanner::Settings::Defender => defender::command(&self.executable, path),
+            scanner::Settings::Custom(settings) => {
+                custom::command(&self.executable, path, settings)
             }
-            scanner::Backend::Defender => {
-                command
-                    .args(["-Scan", "-ScanType", "3", "-File"])
-                    .arg(path)
-                    .arg("-DisableRemediation");
-            }
-        }
+        };
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
         command
@@ -263,41 +255,6 @@ fn program_files() -> PathBuf {
     std::env::var_os("ProgramFiles")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
-}
-
-fn defender_executable() -> PathBuf {
-    let base = std::env::var_os("ProgramData")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
-        .join("Microsoft")
-        .join("Windows Defender")
-        .join("Platform");
-    let mut candidates = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(base) {
-        for entry in entries.flatten() {
-            let path = entry.path().join("MpCmdRun.exe");
-            if !path.is_file() {
-                continue;
-            }
-            let name = entry.file_name();
-            if let Some(version) = name.to_str().and_then(version) {
-                candidates.push((version, path));
-            }
-        }
-    }
-    candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    candidates.pop().map(|(_, path)| path).unwrap_or_else(|| {
-        program_files()
-            .join("Windows Defender")
-            .join("MpCmdRun.exe")
-    })
-}
-
-fn version(name: &str) -> Option<Vec<u32>> {
-    name.split(['.', '-'])
-        .map(str::parse)
-        .collect::<Result<Vec<_>, _>>()
-        .ok()
 }
 
 fn stopped(cancel: &watch::Receiver<bool>, deadline: Instant) -> bool {
@@ -403,6 +360,8 @@ async fn supervise(
             },
         }
         if stop && !exited {
+            // Windows termination can return the same code as a genuine detection.
+            capture.termination_requested = true;
             capture.truncated |=
                 capture.stdout.len() == OUTPUT_LIMIT || capture.stderr.len() == OUTPUT_LIMIT;
             if let Err(error) = child.start_kill() {
@@ -440,16 +399,20 @@ mod tests {
 
     #[test]
     fn versions_are_sorted_numerically() {
-        assert!(version("4.18.10.0-0") > version("4.18.9.0-0"));
-        assert_eq!(version("CurrentVersion"), None);
+        assert!(defender::version("4.18.10.0-0") > defender::version("4.18.9.0-0"));
+        assert_eq!(defender::version("CurrentVersion"), None);
     }
 
     #[test]
     fn commands_keep_the_input_path_as_one_argument() {
         let path = Path::new("C:/scan folder/mail & example.eml");
-        for backend in [scanner::Backend::Avast, scanner::Backend::Defender] {
+        for settings in [
+            scanner::Settings::Avast(scanner::avast::Settings::default()),
+            scanner::Settings::Defender,
+        ] {
+            let backend = settings.backend();
             let engine = Engine {
-                backend,
+                settings,
                 executable: PathBuf::from("scanner.exe"),
             };
             let command = engine.command(path);
@@ -467,6 +430,63 @@ mod tests {
     }
 
     #[test]
+    fn avast_arguments_follow_the_selected_inspection_scope() {
+        for (entire_files, archives, heuristics) in
+            [(true, true, 50), (false, false, 0), (false, true, 100)]
+        {
+            let engine = Engine {
+                settings: scanner::Settings::Avast(scanner::avast::Settings {
+                    entire_files,
+                    archives,
+                    heuristics,
+                }),
+                executable: "scanner.exe".into(),
+            };
+            let command = engine.command(Path::new("mail.eml"));
+            let args = command
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert!(args.contains(&"/a".into()));
+            assert!(args.contains(&"/p=4".into()));
+            assert!(args.contains(&format!("/e={heuristics}")));
+            assert_eq!(args.contains(&"/c".into()), entire_files);
+            assert!(args.contains(&if archives {
+                "/t=A".into()
+            } else {
+                "/t=N".into()
+            }));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn custom_resolves_the_selected_native_executable() {
+        let settings = config::Settings::try_from(config::Draft {
+            host: "imap.example.org".into(),
+            username: "user".into(),
+            password: "password".into(),
+            scan_dir: "scan".into(),
+            quarantine_dir: "quarantine".into(),
+            scanner: scanner::Settings::Custom(scanner::custom::Settings {
+                executable: std::env::current_exe().unwrap(),
+                arguments: vec!["{file}".into()],
+                clean_code: 0,
+                detected_code: 1,
+            }),
+            ..Default::default()
+        })
+        .unwrap();
+        let engine = Engine::resolve(&settings).unwrap();
+        assert_eq!(engine.backend(), scanner::Backend::Custom);
+        assert_eq!(
+            engine.executable(),
+            std::env::current_exe().unwrap().canonicalize().unwrap()
+        );
+    }
+
+    #[test]
     fn child_fixture() {
         match std::env::var("MAILBOX_SCANNER_FIXTURE").as_deref() {
             Ok("output") => {
@@ -479,6 +499,19 @@ mod tests {
                 let _ = thread.join();
             }
             Ok("sleep") => std::thread::sleep(Duration::from_secs(30)),
+            Ok("exit") => {
+                let code = std::env::var("MAILBOX_SCANNER_EXIT")
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                std::process::exit(code);
+            }
+            Ok("argv") => {
+                let expected = std::env::var_os("MAILBOX_SCANNER_PATH").unwrap();
+                let arguments = std::env::args_os().collect::<Vec<_>>();
+                assert_eq!(arguments.last(), Some(&expected));
+                println!("literal path verified");
+            }
             _ => {}
         }
     }
@@ -526,6 +559,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(capture.cancelled);
+        assert!(capture.termination_requested);
+        assert_no_forced_detection(capture);
     }
 
     #[tokio::test]
@@ -539,6 +574,166 @@ mod tests {
         .await
         .unwrap();
         assert!(capture.timed_out);
+        assert!(capture.termination_requested);
+        assert_no_forced_detection(capture);
+    }
+
+    fn assert_no_forced_detection(capture: classify::Capture) {
+        for settings in [
+            scanner::Settings::Custom(custom_settings(vec!["{file}".into()])),
+            scanner::Settings::Avast(scanner::avast::Settings::default()),
+        ] {
+            let result = classify::report(
+                &settings,
+                Path::new("mail.eml"),
+                classify::Capture {
+                    code: capture.code,
+                    termination_requested: capture.termination_requested,
+                    timed_out: capture.timed_out,
+                    cancelled: capture.cancelled,
+                    ..Default::default()
+                },
+            );
+            assert!(!result.detected());
+            assert!(!result.complete());
+        }
+    }
+
+    fn custom_settings(arguments: Vec<String>) -> scanner::custom::Settings {
+        scanner::custom::Settings {
+            executable: std::env::current_exe().unwrap(),
+            arguments,
+            clean_code: 0,
+            detected_code: 1,
+        }
+    }
+
+    #[test]
+    fn custom_arguments_are_literal_and_preserve_empty_values() {
+        let settings = custom_settings(vec![
+            "".into(),
+            "a & b | c".into(),
+            "\"quoted\"".into(),
+            "{file}".into(),
+        ]);
+        let path = Path::new("C:/scan folder/mail & example.eml");
+        let command = custom::command(&settings.executable, path, &settings);
+        assert_eq!(
+            command.as_std().get_args().collect::<Vec<_>>(),
+            vec![
+                std::ffi::OsStr::new(""),
+                std::ffi::OsStr::new("a & b | c"),
+                std::ffi::OsStr::new("\"quoted\""),
+                path.as_os_str(),
+            ]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn custom_placeholder_keeps_non_unicode_path_units() {
+        use std::os::windows::ffi::OsStringExt;
+        let mut units = "C:\\scan\\".encode_utf16().collect::<Vec<_>>();
+        units.push(0xd800);
+        units.extend(".eml".encode_utf16());
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&units));
+        let settings = custom_settings(vec!["{file}".into()]);
+        let command = custom::command(&settings.executable, &path, &settings);
+        assert_eq!(
+            command.as_std().get_args().collect::<Vec<_>>(),
+            vec![path.as_os_str()]
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_command_round_trips_a_literal_path_to_the_child() {
+        let settings = custom_settings(vec![
+            "--exact".into(),
+            "mailbox_scanner::scanner::tests::child_fixture".into(),
+            "--nocapture".into(),
+            "--skip".into(),
+            "{file}".into(),
+        ]);
+        let path = Path::new("C:/scan folder/mail & literal.eml");
+        let mut command = custom::command(&settings.executable, path, &settings);
+        command
+            .env("MAILBOX_SCANNER_FIXTURE", "argv")
+            .env("MAILBOX_SCANNER_PATH", path);
+        let (_sender, receiver) = watch::channel(false);
+        let capture = supervise(command, receiver, Instant::now() + Duration::from_secs(10))
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&capture.stdout).contains("literal path verified"));
+        let report = classify::report(&scanner::Settings::Custom(settings), path, capture);
+        assert!(!report.detected());
+        assert!(report.complete());
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn custom_engine_scans_harmless_mail_with_configured_exit_codes() {
+        let directory = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "custom-scan-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir(&directory).unwrap();
+        let mail = directory.join("mail & sample.eml");
+        std::fs::write(&mail, b"From: sender@example.test\r\nSubject: harmless fixture\r\n\r\nNo threat signature here.\r\n").unwrap();
+        for (code, detected, complete) in [(0, false, true), (1, true, true), (7, false, false)] {
+            // Select only the harmless fixture in this isolated test executable.
+            let arguments = if code == 0 {
+                vec![
+                    "--exact".into(),
+                    "mailbox_scanner::scanner::tests::child_fixture".into(),
+                    "--skip".into(),
+                    "{file}".into(),
+                ]
+            } else {
+                vec![
+                    "--exact".into(),
+                    "mailbox_scanner::scanner::tests::child_fixture_exit_one".into(),
+                    "--ignored".into(),
+                    "--skip".into(),
+                    "{file}".into(),
+                ]
+            };
+            let mut input = custom_settings(arguments);
+            if code == 7 {
+                input.detected_code = 7;
+            }
+            let config = config::Settings::try_from(config::Draft {
+                host: "unused.invalid".into(),
+                username: "unused".into(),
+                password: "unused".into(),
+                scan_dir: directory.clone(),
+                quarantine_dir: directory.clone(),
+                scanner: scanner::Settings::Custom(input),
+                ..Default::default()
+            })
+            .unwrap();
+            let engine = Engine::resolve(&config).unwrap();
+            let (_sender, receiver) = watch::channel(false);
+            let mut files = Vec::new();
+            let result = engine.scan(&mail, &mut files, receiver).await.unwrap();
+            assert_eq!(result.detected(), detected);
+            assert_eq!(result.complete(), complete);
+            assert!(files.iter().all(|path| !path.exists()));
+        }
+        std::fs::remove_file(mail).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    #[ignore = "Exit-code fixture invoked only in an isolated scanner subprocess"]
+    fn child_fixture_exit_one() {
+        std::process::exit(1);
     }
 
     #[cfg(windows)]
@@ -561,7 +756,7 @@ mod tests {
             password: "unused".into(),
             scan_dir: work.clone(),
             quarantine_dir: work.clone(),
-            backend: scanner::Backend::Defender,
+            scanner: scanner::Settings::Defender,
             ..config::Draft::default()
         })
         .unwrap();
@@ -595,7 +790,7 @@ mod tests {
                         eprintln!("Original EML CLI exit: {:?}", capture.code);
                         eprintln!("stdout:\n{}", String::from_utf8_lossy(&capture.stdout));
                         eprintln!("stderr:\n{}", String::from_utf8_lossy(&capture.stderr));
-                        let direct = classify::report(scanner::Backend::Defender, &path, capture);
+                        let direct = classify::report(&scanner::Settings::Defender, &path, capture);
                         eprintln!(
                             "Original EML detected={}, complete={}, issues={:?}",
                             direct.detected(),
@@ -620,7 +815,7 @@ mod tests {
                                     String::from_utf8_lossy(&capture.stderr)
                                 );
                                 let report = classify::report(
-                                    scanner::Backend::Defender,
+                                    &scanner::Settings::Defender,
                                     &positive,
                                     capture,
                                 );

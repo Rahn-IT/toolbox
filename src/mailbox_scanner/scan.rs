@@ -660,7 +660,7 @@ impl State {
                     ))
                     .size(13)
                     .width(Length::Fill),
-                    text(format!("Scanner: {}", self.settings.backend()))
+                    text(format!("Scanner: {}", self.settings.scanner().summary()))
                         .size(13)
                         .width(Length::Fill),
                     text(format!("Parallel scans: {}", self.settings.parallel()))
