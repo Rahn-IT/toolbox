@@ -1,19 +1,21 @@
 //! Direct, bounded execution of installed antivirus command-line scanners.
 
 mod avast;
+pub(crate) mod batch;
 mod classify;
 mod custom;
 mod defender;
-mod mime;
+pub(super) mod mime;
+pub(super) mod transport;
 
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+
 use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::mailbox_scanner::core::{config, detection, scanner};
@@ -21,7 +23,6 @@ use crate::mailbox_scanner::core::{config, detection, scanner};
 const OUTPUT_LIMIT: usize = 64 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const MESSAGE_TIMEOUT: Duration = Duration::from_secs(300);
-const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A selected installed command-line engine. The backend set is deliberately closed.
 #[derive(Clone)]
@@ -41,12 +42,8 @@ pub enum Error {
     Executable(PathBuf),
     #[error("Scanner I/O failed: {0}")]
     Io(#[from] io::Error),
-}
-
-enum Output {
-    Stdout(Vec<u8>),
-    Stderr(Vec<u8>),
-    Failed(String),
+    #[error("Scanner termination was not confirmed; scan files must be retained")]
+    TerminationUnconfirmed,
 }
 
 impl Engine {
@@ -111,7 +108,7 @@ impl Engine {
             return Ok(report);
         }
         let deadline = Instant::now() + MESSAGE_TIMEOUT;
-        report.merge(self.file(&eml, cancel.clone(), deadline).await);
+        report.merge(self.file(&eml, cancel.clone(), deadline).await?);
         if stopped(&cancel, deadline) {
             report.warn(detection::Issue::Cancelled);
             return Ok(report);
@@ -173,7 +170,7 @@ impl Engine {
             .await;
             drop(file);
             match write {
-                Ok(()) => report.merge(self.file(&path, cancel.clone(), deadline).await),
+                Ok(()) => report.merge(self.file(&path, cancel.clone(), deadline).await?),
                 Err(error) => report.warn(detection::Issue::Input(format!(
                     "Cannot prepare MIME scan file {}: {error}",
                     path.display()
@@ -204,18 +201,19 @@ impl Engine {
         path: &Path,
         cancel: watch::Receiver<bool>,
         deadline: Instant,
-    ) -> detection::Report {
+    ) -> Result<detection::Report, Error> {
         let before = tokio::fs::metadata(path)
             .await
             .map(|metadata| metadata.len());
-        let mut report = match supervise(
+        let mut report = match capture(
             self.command(path),
             cancel,
             deadline.min(Instant::now() + COMMAND_TIMEOUT),
         )
         .await
         {
-            Ok(capture) => classify::report(&self.settings, path, capture),
+            Ok((capture, true)) => classify::report(&self.settings, path, capture),
+            Ok((_, false)) => return Err(Error::TerminationUnconfirmed),
             Err(error) => {
                 let mut report = detection::Report::new();
                 report.warn(detection::Issue::Scanner(format!(
@@ -234,7 +232,7 @@ impl Engine {
                 path.display()
             ))),
         }
-        report
+        Ok(report)
     }
 
     fn command(&self, path: &Path) -> Command {
@@ -272,121 +270,38 @@ async fn cancelled(cancel: &mut watch::Receiver<bool>) {
     }
 }
 
-async fn pipe<R: tokio::io::AsyncRead + Unpin>(
-    mut reader: R,
-    sender: mpsc::Sender<Output>,
-    stdout: bool,
-) {
-    let mut buffer = [0_u8; 4096];
-    loop {
-        match reader.read(&mut buffer).await {
-            Ok(0) => break,
-            Ok(length) => {
-                let bytes = buffer[..length].to_vec();
-                let output = if stdout {
-                    Output::Stdout(bytes)
-                } else {
-                    Output::Stderr(bytes)
-                };
-                if sender.send(output).await.is_err() {
-                    break;
-                }
-            }
-            Err(error) => {
-                let _ = sender.send(Output::Failed(error.to_string())).await;
-                break;
-            }
-        }
-    }
-}
-
+#[cfg(test)]
 async fn supervise(
-    mut command: Command,
-    mut cancel: watch::Receiver<bool>,
+    command: Command,
+    cancel: watch::Receiver<bool>,
     deadline: Instant,
 ) -> io::Result<classify::Capture> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    let mut child = command.spawn()?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| io::Error::other("Missing scanner stdout pipe"))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| io::Error::other("Missing scanner stderr pipe"))?;
-    let (sender, mut receiver) = mpsc::channel(16);
-    let out = tokio::spawn(pipe(stdout, sender.clone(), true));
-    let err = tokio::spawn(pipe(stderr, sender, false));
-    let mut capture = classify::Capture::default();
-    let mut exited = false;
-    let mut pipes_open = true;
-    let mut draining_until = deadline;
-    loop {
-        if exited && !pipes_open {
-            break;
-        }
-        let mut stop = false;
-        tokio::select! {
-            status = child.wait(), if !exited => {
-                match status {
-                    Ok(status) => capture.code = status.code(),
-                    Err(error) => capture.failure = Some(error.to_string()),
-                }
-                exited = true;
-                draining_until = Instant::now() + DRAIN_TIMEOUT;
-            },
-            output = receiver.recv(), if pipes_open => match output {
-                Some(Output::Stdout(bytes)) => stop = append(&mut capture.stdout, &bytes),
-                Some(Output::Stderr(bytes)) => stop = append(&mut capture.stderr, &bytes),
-                Some(Output::Failed(error)) => { capture.failure = Some(error); stop = true; },
-                None => pipes_open = false,
-            },
-            _ = tokio::time::sleep_until(deadline), if !exited => {
-                capture.timed_out = true;
-                stop = true;
-            },
-            _ = cancelled(&mut cancel), if !exited => {
-                capture.cancelled = true;
-                stop = true;
-            },
-            _ = tokio::time::sleep_until(draining_until), if exited => {
-                capture.truncated = true;
-                break;
-            },
-        }
-        if stop && !exited {
-            // Windows termination can return the same code as a genuine detection.
-            capture.termination_requested = true;
-            capture.truncated |=
-                capture.stdout.len() == OUTPUT_LIMIT || capture.stderr.len() == OUTPUT_LIMIT;
-            if let Err(error) = child.start_kill() {
-                capture.failure = Some(format!("Cannot terminate scanner wrapper: {error}"));
-            }
-            match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
-                Ok(Ok(status)) => capture.code = status.code(),
-                Ok(Err(error)) => capture.failure = Some(error.to_string()),
-                Err(_) => {
-                    capture.failure = Some("Scanner wrapper did not acknowledge termination".into())
-                }
-            }
-            exited = true;
-            draining_until = Instant::now() + DRAIN_TIMEOUT;
-        } else if stop {
-            capture.truncated = true;
-        }
-    }
-    out.abort();
-    err.abort();
-    let _ = out.await;
-    let _ = err.await;
+    let (capture, _) = capture(command, cancel, deadline).await?;
     Ok(capture)
 }
 
+async fn capture(
+    command: Command,
+    cancel: watch::Receiver<bool>,
+    deadline: Instant,
+) -> io::Result<(classify::Capture, bool)> {
+    let mut capture = classify::Capture::default();
+    let outcome = transport::run(command, cancel, deadline, |stream, bytes| {
+        let target = match stream {
+            transport::Stream::Stdout => &mut capture.stdout,
+            transport::Stream::Stderr => &mut capture.stderr,
+        };
+        capture.truncated |= append(target, bytes);
+    })
+    .await?;
+    capture.code = outcome.code;
+    capture.termination_requested = outcome.termination_requested;
+    capture.timed_out = outcome.timed_out;
+    capture.cancelled = outcome.cancelled;
+    capture.truncated |= outcome.drain_incomplete;
+    capture.failure = outcome.failure;
+    Ok((capture, outcome.exit_confirmed))
+}
 fn append(target: &mut Vec<u8>, bytes: &[u8]) -> bool {
     let available = OUTPUT_LIMIT.saturating_sub(target.len());
     target.extend_from_slice(&bytes[..bytes.len().min(available)]);
@@ -471,7 +386,7 @@ mod tests {
             quarantine_dir: "quarantine".into(),
             scanner: scanner::Settings::Custom(scanner::custom::Settings {
                 executable: std::env::current_exe().unwrap(),
-                arguments: vec!["{file}".into()],
+                arguments: vec!["{directory}".into()],
                 clean_code: 0,
                 detected_code: 1,
             }),
@@ -499,6 +414,12 @@ mod tests {
                 let _ = thread.join();
             }
             Ok("sleep") => std::thread::sleep(Duration::from_secs(30)),
+            Ok("stream") => {
+                use std::io::Write;
+                println!("\nmail.eml\tDETECTED\tfixture");
+                io::stdout().flush().unwrap();
+                std::thread::sleep(Duration::from_secs(30));
+            }
             Ok("exit") => {
                 let code = std::env::var("MAILBOX_SCANNER_EXIT")
                     .unwrap()
@@ -541,6 +462,63 @@ mod tests {
         assert!(capture.truncated);
         assert!(capture.stdout.len() <= OUTPUT_LIMIT);
         assert!(capture.stderr.len() <= OUTPUT_LIMIT);
+        assert_eq!(capture.code, Some(0));
+        assert!(!capture.termination_requested);
+    }
+
+    #[tokio::test]
+    async fn transport_delivers_all_output_without_capture_volume_termination() {
+        let (_sender, receiver) = watch::channel(false);
+        let mut lengths = [0usize; 2];
+        let outcome = transport::run(
+            fixture("output"),
+            receiver,
+            Instant::now() + Duration::from_secs(10),
+            |stream, bytes| {
+                lengths[usize::from(stream == transport::Stream::Stderr)] += bytes.len()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(lengths.into_iter().all(|length| length >= OUTPUT_LIMIT * 2));
+        assert_eq!(outcome.code, Some(0));
+        assert!(outcome.exit_confirmed);
+        assert!(!outcome.termination_requested);
+        assert!(!outcome.drain_incomplete);
+    }
+
+    #[tokio::test]
+    async fn streamed_record_arrives_while_the_child_is_running() {
+        let (cancel, receiver) = watch::channel(false);
+        let (notice, received) = tokio::sync::oneshot::channel();
+        let mut notice = Some(notice);
+        let mut lines = transport::Lines::default();
+        let task = tokio::spawn(transport::run(
+            fixture("stream"),
+            receiver,
+            Instant::now() + Duration::from_secs(10),
+            move |stream, bytes| {
+                if stream == transport::Stream::Stdout {
+                    lines.push(bytes, |record| {
+                        if let transport::Record::Line(line) = record
+                            && line == b"mail.eml\tDETECTED\tfixture"
+                            && let Some(notice) = notice.take()
+                        {
+                            let _ = notice.send(());
+                        }
+                    });
+                }
+            },
+        ));
+        tokio::time::timeout(Duration::from_secs(5), received)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!task.is_finished());
+        cancel.send(true).unwrap();
+        let outcome = task.await.unwrap().unwrap();
+        assert!(outcome.cancelled);
+        assert!(outcome.exit_confirmed);
     }
 
     #[tokio::test]
@@ -580,7 +558,7 @@ mod tests {
 
     fn assert_no_forced_detection(capture: classify::Capture) {
         for settings in [
-            scanner::Settings::Custom(custom_settings(vec!["{file}".into()])),
+            scanner::Settings::Custom(custom_settings(vec!["{directory}".into()])),
             scanner::Settings::Avast(scanner::avast::Settings::default()),
         ] {
             let result = classify::report(
@@ -614,10 +592,10 @@ mod tests {
             "".into(),
             "a & b | c".into(),
             "\"quoted\"".into(),
-            "{file}".into(),
+            "{directory}".into(),
         ]);
         let path = Path::new("C:/scan folder/mail & example.eml");
-        let command = custom::command(&settings.executable, path, &settings);
+        let command = custom::directory_command(&settings.executable, path, &settings);
         assert_eq!(
             command.as_std().get_args().collect::<Vec<_>>(),
             vec![
@@ -637,8 +615,8 @@ mod tests {
         units.push(0xd800);
         units.extend(".eml".encode_utf16());
         let path = PathBuf::from(std::ffi::OsString::from_wide(&units));
-        let settings = custom_settings(vec!["{file}".into()]);
-        let command = custom::command(&settings.executable, &path, &settings);
+        let settings = custom_settings(vec!["{directory}".into()]);
+        let command = custom::directory_command(&settings.executable, &path, &settings);
         assert_eq!(
             command.as_std().get_args().collect::<Vec<_>>(),
             vec![path.as_os_str()]
@@ -652,10 +630,10 @@ mod tests {
             "mailbox_scanner::scanner::tests::child_fixture".into(),
             "--nocapture".into(),
             "--skip".into(),
-            "{file}".into(),
+            "{directory}".into(),
         ]);
         let path = Path::new("C:/scan folder/mail & literal.eml");
-        let mut command = custom::command(&settings.executable, path, &settings);
+        let mut command = custom::directory_command(&settings.executable, path, &settings);
         command
             .env("MAILBOX_SCANNER_FIXTURE", "argv")
             .env("MAILBOX_SCANNER_PATH", path);
@@ -670,66 +648,6 @@ mod tests {
     }
 
     #[cfg(windows)]
-    #[tokio::test]
-    async fn custom_engine_scans_harmless_mail_with_configured_exit_codes() {
-        let directory = std::env::current_dir()
-            .unwrap()
-            .join("target")
-            .join(format!(
-                "custom-scan-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-        std::fs::create_dir(&directory).unwrap();
-        let mail = directory.join("mail & sample.eml");
-        std::fs::write(&mail, b"From: sender@example.test\r\nSubject: harmless fixture\r\n\r\nNo threat signature here.\r\n").unwrap();
-        for (code, detected, complete) in [(0, false, true), (1, true, true), (7, false, false)] {
-            // Select only the harmless fixture in this isolated test executable.
-            let arguments = if code == 0 {
-                vec![
-                    "--exact".into(),
-                    "mailbox_scanner::scanner::tests::child_fixture".into(),
-                    "--skip".into(),
-                    "{file}".into(),
-                ]
-            } else {
-                vec![
-                    "--exact".into(),
-                    "mailbox_scanner::scanner::tests::child_fixture_exit_one".into(),
-                    "--ignored".into(),
-                    "--skip".into(),
-                    "{file}".into(),
-                ]
-            };
-            let mut input = custom_settings(arguments);
-            if code == 7 {
-                input.detected_code = 7;
-            }
-            let config = config::Settings::try_from(config::Draft {
-                host: "unused.invalid".into(),
-                username: "unused".into(),
-                password: "unused".into(),
-                scan_dir: directory.clone(),
-                quarantine_dir: directory.clone(),
-                scanner: scanner::Settings::Custom(input),
-                ..Default::default()
-            })
-            .unwrap();
-            let engine = Engine::resolve(&config).unwrap();
-            let (_sender, receiver) = watch::channel(false);
-            let mut files = Vec::new();
-            let result = engine.scan(&mail, &mut files, receiver).await.unwrap();
-            assert_eq!(result.detected(), detected);
-            assert_eq!(result.complete(), complete);
-            assert!(files.iter().all(|path| !path.exists()));
-        }
-        std::fs::remove_file(mail).unwrap();
-        std::fs::remove_dir(directory).unwrap();
-    }
-
     #[test]
     #[ignore = "Exit-code fixture invoked only in an isolated scanner subprocess"]
     fn child_fixture_exit_one() {

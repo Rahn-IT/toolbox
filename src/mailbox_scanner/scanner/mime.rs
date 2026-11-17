@@ -4,23 +4,24 @@ use std::sync::Arc;
 
 use crate::mailbox_scanner::core::detection;
 
-pub(super) const MAX_ORIGINAL: usize = crate::mailbox_scanner::core::limits::MESSAGE_BYTES;
+pub(in crate::mailbox_scanner) const MAX_ORIGINAL: usize =
+    crate::mailbox_scanner::core::limits::MESSAGE_BYTES;
 const MAX_LEAF: usize = crate::mailbox_scanner::core::limits::MESSAGE_BYTES;
 const MAX_TOTAL: usize = crate::mailbox_scanner::core::limits::DECODED_BYTES;
 
-pub(super) struct Parsed {
+pub(in crate::mailbox_scanner) struct Parsed {
     message: Arc<mail_parser::Message<'static>>,
     index: usize,
     decoded: usize,
 }
 
-pub(super) struct Leaf {
+pub(in crate::mailbox_scanner) struct Leaf {
     pub bytes: Option<Vec<u8>>,
     pub issues: Vec<detection::Issue>,
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum Error {
+pub(in crate::mailbox_scanner) enum Error {
     #[error("Mail has no parseable message structure")]
     Invalid,
     #[error("MIME worker failed: {0}")]
@@ -28,7 +29,7 @@ pub(super) enum Error {
 }
 
 impl Parsed {
-    pub(super) async fn parse(raw: Vec<u8>) -> Result<Self, Error> {
+    pub(in crate::mailbox_scanner) async fn parse(raw: Vec<u8>) -> Result<Self, Error> {
         let message = tokio::task::spawn_blocking(move || {
             mail_parser::MessageParser::new()
                 .max_depth(16)
@@ -45,7 +46,7 @@ impl Parsed {
         })
     }
 
-    pub(super) async fn next(&mut self) -> Result<Option<Leaf>, Error> {
+    pub(in crate::mailbox_scanner) async fn next(&mut self) -> Result<Option<Leaf>, Error> {
         if self.index >= self.message.parts().len() {
             return Ok(None);
         }

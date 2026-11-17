@@ -50,8 +50,8 @@ pub enum Error {
     /// Arguments and executable paths cannot contain NUL characters.
     #[error("Scanner paths and arguments cannot contain NUL characters")]
     Nul,
-    /// The file path must be supplied as a separate argument.
-    #[error("Add a separate {{file}} argument; do not embed it in another argument")]
+    /// The directory path must be supplied as a separate argument.
+    #[error("Add a separate {{directory}} argument; do not embed it in another argument")]
     Placeholder,
     /// Clean and detected outcomes must be distinguishable.
     #[error("Clean and detected exit codes must be different")]

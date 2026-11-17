@@ -1,0 +1,56 @@
+# Local planning and resume configuration; no GitHub tracking configured.
+project: toolbox
+description: Directory-batched mailbox antivirus scanning with live per-message findings
+repo: Rahn-IT/toolbox
+milestone: none
+default_branch: master
+tracking: local
+handoff:
+  dir: .claude/map/mailbox-batching
+  prefix: SESSION_HANDOFF
+workspace:
+  - name: toolbox
+    path: .
+    role: Single binary containing mailbox scanner and other toolbox tools
+checklist:
+  quick:
+    - cargo fmt --check
+    - cargo check --locked --offline
+  verify:
+    - cargo test --locked mailbox_scanner
+    - cargo test --locked
+    - cargo build --release --locked
+  lint:
+    - cargo clippy --all-targets --locked
+key_files:
+  - AGENTS.md
+  - .claude/map/mailbox-batching/MAP_PLAN.md
+  - Cargo.toml
+  - src/mailbox_scanner/workflow.rs
+  - src/mailbox_scanner/scanner.rs
+  - src/mailbox_scanner/scanner/avast.rs
+  - src/mailbox_scanner/scanner/defender.rs
+  - src/mailbox_scanner/scanner/custom.rs
+  - src/mailbox_scanner/scanner/mime.rs
+  - src/mailbox_scanner/core/config.rs
+  - src/mailbox_scanner/core/event.rs
+  - src/mailbox_scanner/scan.rs
+style:
+  - Follow AGENTS.md; Rust only, no unsafe or new unapproved dependencies.
+  - Preserve single executable distribution and existing scanner installation requirement.
+  - Do not edit README.md or unrelated code.
+workflow:
+  - User chose local tracking and AGENTS.md conventions.
+  - Follow MAP phases in order; no automatic commits or pushes.
+  - Final nonempty undersized batch always scans on normal exhaustion.
+  - Phase 1 verifies backend behavior before dependent implementation.
+  - No compatibility shim for the changed Custom scanner contract.
+  - Record existing check failures without broadening scope to repair them.
+baseline_blockers:
+  - Toolchain updated to Rust 1.100.0; no compiler-version blocker remains.
+  - cargo fmt --check reports an unrelated formatting difference in src/quick_install/discord.rs.
+phase_status:
+  phase_1: complete
+  phase_2: complete
+  phase_3: complete
+  phase_4: complete

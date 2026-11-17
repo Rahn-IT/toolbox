@@ -34,6 +34,7 @@ pub struct State {
     folder: Option<String>,
     rows: Vec<Finding>,
     index: HashMap<message::Identity, usize>,
+    versions: HashMap<message::Identity, (u64, bool)>,
     page: usize,
     diagnostics: Vec<String>,
     omitted_diagnostics: u64,
@@ -51,6 +52,7 @@ struct Finding {
     subject: String,
     sender: String,
     report: detection::Report,
+    terminal: bool,
     selected: bool,
     expanded: bool,
     upstream: Upstream,
@@ -167,6 +169,7 @@ impl State {
             folder: None,
             rows: Vec::new(),
             index: HashMap::new(),
+            versions: HashMap::new(),
             page: 0,
             diagnostics: Vec::new(),
             omitted_diagnostics: 0,
@@ -386,9 +389,35 @@ impl State {
                 sender,
                 report,
             } => {
+                self.receive(event::Event::MessageUpdated {
+                    identity,
+                    subject,
+                    sender,
+                    report,
+                    revision: u64::MAX,
+                    terminal: true,
+                });
+            }
+            event::Event::MessageUpdated {
+                identity,
+                subject,
+                sender,
+                report,
+                revision,
+                terminal,
+            } => {
+                if self
+                    .versions
+                    .get(&identity)
+                    .is_some_and(|(previous, finished)| *finished || revision <= *previous)
+                {
+                    return;
+                }
+                self.versions.insert(identity.clone(), (revision, terminal));
                 if report.detected() {
                     if let Some(finding) = self.find(&identity) {
-                        finding.report.merge(report);
+                        finding.report = report;
+                        finding.terminal = terminal;
                     } else {
                         let index = self.rows.len();
                         self.index.insert(identity.clone(), index);
@@ -397,6 +426,7 @@ impl State {
                             subject,
                             sender,
                             report,
+                            terminal,
                             selected: false,
                             expanded: false,
                             upstream: Upstream::NotPurged,
@@ -405,7 +435,7 @@ impl State {
                             detail: String::new(),
                         });
                     }
-                } else if !report.complete() {
+                } else if terminal && !report.complete() {
                     let mut detail = report
                         .issues()
                         .iter()
@@ -663,9 +693,19 @@ impl State {
                     text(format!("Scanner: {}", self.settings.scanner().summary()))
                         .size(13)
                         .width(Length::Fill),
-                    text(format!("Parallel scans: {}", self.settings.parallel()))
-                        .size(13)
-                        .width(Length::Fill),
+                    text(format!(
+                        "Parallel {}: {}",
+                        if self.settings.backend()
+                            == crate::mailbox_scanner::core::scanner::Backend::Defender
+                        {
+                            "mails"
+                        } else {
+                            "batches"
+                        },
+                        self.settings.parallel()
+                    ))
+                    .size(13)
+                    .width(Length::Fill),
                 ]
                 .spacing(16)
             ]
@@ -702,7 +742,7 @@ impl State {
             "Stop scan"
         })
         .on_press_maybe((scanning && !self.stopping).then_some(Message::StopScan));
-        let summary = column![
+        let mut summary = column![
             row![text(status).size(18), space().width(Length::Fill), stop]
                 .align_y(iced::Alignment::Center),
             text(
@@ -719,10 +759,10 @@ impl State {
                 text(format!("Total: {}", self.counts.total))
                     .size(13)
                     .width(Length::Fill),
-                text(format!("Active scans: {}", self.counts.active))
+                text(format!("Active mails: {}", self.counts.active))
                     .size(13)
                     .width(Length::Fill),
-                text(format!("Buffered: {}", self.counts.queued))
+                text(format!("Buffered mails: {}", self.counts.queued))
                     .size(13)
                     .width(Length::Fill),
             ]
@@ -745,6 +785,17 @@ impl State {
         ]
         .spacing(8);
 
+        if self.settings.backend() != crate::mailbox_scanner::core::scanner::Backend::Defender {
+            summary = summary.push(
+                text(format!(
+                    "Batches: {} active · {} waiting · target {} MiB",
+                    self.counts.batches_active,
+                    self.counts.batches_queued,
+                    self.settings.batch_bytes() / (1024 * 1024)
+                ))
+                .size(13),
+            );
+        }
         let mut table = column![
             row![
                 text("").width(30),
@@ -920,6 +971,9 @@ impl State {
         ]
         .spacing(5)
         .width(225);
+        if !finding.terminal {
+            status = status.push(text("Inspection still running…").size(12));
+        }
         if !finding.report.complete() {
             status = status.push(text("Incomplete scan coverage").size(12));
         }
@@ -1248,6 +1302,7 @@ mod tests {
         let identity = detected(&mut state, 1);
         state.rows.clear();
         state.index.clear();
+        state.versions.clear();
         let mut report = detection::Report::new();
         report.warn(detection::Issue::Scanner("Engine unavailable".into()));
         state.receive(event::Event::MessageFinished {
@@ -1260,5 +1315,95 @@ mod tests {
         assert_eq!(state.diagnostics.len(), 1);
         assert!(state.diagnostics[0].contains("Engine unavailable"));
         assert_eq!(state.counts.processed, 0);
+    }
+
+    #[test]
+    fn live_snapshots_replace_evidence_and_finalize_without_unlocking_actions() {
+        let mut state = state();
+        let identity = detected(&mut state, 1);
+        let report = state.rows[0].report.clone();
+        state.rows.clear();
+        state.index.clear();
+        state.versions.clear();
+        state.runner_done = false;
+        state.stream_closed = false;
+        state.receive(event::Event::MessageUpdated {
+            identity: identity.clone(),
+            subject: "Live finding".into(),
+            sender: "Sender".into(),
+            report: report.clone(),
+            revision: 1,
+            terminal: false,
+        });
+        assert_eq!(state.rows.len(), 1);
+        assert!(!state.rows[0].terminal);
+        assert!(state.busy());
+        state.rows[0].selected = true;
+        state.rows[0].expanded = true;
+        state.receive(event::Event::MessageUpdated {
+            identity: identity.clone(),
+            subject: "Live finding".into(),
+            sender: "Sender".into(),
+            report: report.clone(),
+            revision: 2,
+            terminal: false,
+        });
+        let mut final_report = report.clone();
+        final_report.warn(detection::Issue::Cancelled);
+        state.receive(event::Event::MessageUpdated {
+            identity: identity.clone(),
+            subject: "Live finding".into(),
+            sender: "Sender".into(),
+            report: final_report,
+            revision: u64::MAX,
+            terminal: true,
+        });
+        assert_eq!(state.rows[0].report.evidence().len(), 1);
+        assert!(state.rows[0].terminal);
+        assert!(!state.rows[0].report.complete());
+        assert!(state.rows[0].selected && state.rows[0].expanded);
+        assert!(state.busy());
+        state.receive(event::Event::MessageUpdated {
+            identity,
+            subject: "Stale".into(),
+            sender: "Sender".into(),
+            report,
+            revision: 3,
+            terminal: false,
+        });
+        assert!(!state.rows[0].report.complete());
+        assert!(state.rows[0].terminal);
+    }
+
+    #[test]
+    fn clean_terminal_snapshot_rejects_late_positive_and_duplicate_diagnostics() {
+        let mut state = state();
+        let identity = detected(&mut state, 1);
+        let positive = state.rows[0].report.clone();
+        state.rows.clear();
+        state.index.clear();
+        state.versions.clear();
+        let mut report = detection::Report::new();
+        report.warn(detection::Issue::Cancelled);
+        for _ in 0..2 {
+            state.receive(event::Event::MessageUpdated {
+                identity: identity.clone(),
+                subject: "Incomplete".into(),
+                sender: "Sender".into(),
+                report: report.clone(),
+                revision: 4,
+                terminal: true,
+            });
+        }
+        state.receive(event::Event::MessageUpdated {
+            identity,
+            subject: "Stale".into(),
+            sender: "Sender".into(),
+            report: positive,
+            revision: 5,
+            terminal: false,
+        });
+        assert!(state.rows.is_empty());
+        assert_eq!(state.diagnostics.len(), 1);
     }
 }

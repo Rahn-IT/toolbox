@@ -1,5 +1,7 @@
 //! Bounded mailbox work and explicit save-before-purge actions.
 
+mod batches;
+
 use std::{
     collections::VecDeque,
     fs::OpenOptions,
@@ -29,6 +31,8 @@ static NEXT: AtomicU64 = AtomicU64::new(0);
 /// A workflow failure. Post-mutation uncertainty is returned as a purge outcome.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error(transparent)]
+    Batch(#[from] crate::mailbox_scanner::batch::Error),
     #[error("Mailbox: {0}")]
     Mailbox(#[from] mailbox::Error),
     #[error("Scanner: {0}")]
@@ -100,6 +104,9 @@ async fn execute(
     counts: &mut event::Counts,
     mut cancel: watch::Receiver<bool>,
 ) -> Result<event::Finish, Error> {
+    if settings.backend() != crate::mailbox_scanner::core::scanner::Backend::Defender {
+        return batches::execute(settings, events, counts, cancel).await;
+    }
     let engine = scanner::Engine::resolve(settings)?;
     let scan_root = prepare(settings.scan_dir())?;
     prepare(settings.quarantine_dir())?;
@@ -236,7 +243,7 @@ async fn execute(
                         }
                     };
                     queue.push_back(pending);
-                    counts.queued = queue.len() as u8;
+                    counts.queued = queue.len() as u64;
                     if aborted || limit {
                         break 'folders;
                     }
@@ -367,8 +374,8 @@ fn dispatch<F, Fut>(
             jobs.spawn(scan(pending));
         }
     }
-    counts.active = jobs.len() as u8;
-    counts.queued = queue.len() as u8;
+    counts.active = jobs.len() as u64;
+    counts.queued = queue.len() as u64;
 }
 
 fn progress(events: &mpsc::Sender<event::Event>, counts: &event::Counts) {
@@ -428,13 +435,21 @@ async fn scan_job(pending: Pending, engine: scanner::Engine, cancel: watch::Rece
         mut files,
         mut report,
     } = pending;
+    let mut cleanup_safe = true;
     if report.complete() {
         match engine.scan(&work, &mut files, cancel).await {
             Ok(found) => report.merge(found),
-            Err(error) => report.warn(detection::Issue::Scanner(error.to_string())),
+            Err(error) => {
+                cleanup_safe = !matches!(error, scanner::Error::TerminationUnconfirmed);
+                report.warn(detection::Issue::Scanner(error.to_string()));
+            }
         }
     }
-    let leftovers = cleanup(&files).await;
+    let leftovers = if cleanup_safe {
+        cleanup(&files).await
+    } else {
+        files
+    };
     if !leftovers.is_empty() {
         report.warn(detection::Issue::Input(
             "Some temporary files could not be removed".into(),

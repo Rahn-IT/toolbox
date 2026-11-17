@@ -22,6 +22,8 @@ pub struct State {
     scan_dir: String,
     quarantine_dir: String,
     parallel: String,
+    batch_mib: String,
+    timeout_minutes: String,
     scanner: Draft,
     picker_token: u64,
     tls: config::Tls,
@@ -48,6 +50,8 @@ pub enum Message {
     PickExecutable,
     ExecutablePicked(u64, Option<PathBuf>),
     Parallel(String),
+    BatchMib(String),
+    TimeoutMinutes(String),
     Backend(scanner::Backend),
     Tls(config::Tls),
     Start,
@@ -103,7 +107,7 @@ impl Default for Custom {
         Self {
             executable: String::new(),
             picked: None,
-            arguments: vec!["{file}".into()],
+            arguments: vec!["{directory}".into()],
             clean_code: "0".into(),
             detected_code: "1".into(),
         }
@@ -153,7 +157,9 @@ impl Default for State {
             password: String::new(),
             scan_dir: String::new(),
             quarantine_dir: String::new(),
-            parallel: "4".into(),
+            parallel: "1".into(),
+            batch_mib: "1024".into(),
+            timeout_minutes: "30".into(),
             scanner: Draft::default(),
             picker_token: 0,
             tls: config::Tls::Implicit,
@@ -201,6 +207,8 @@ impl State {
                 }
             }
             Message::Parallel(value) => self.parallel = value,
+            Message::BatchMib(value) => self.batch_mib = value,
+            Message::TimeoutMinutes(value) => self.timeout_minutes = value,
             Message::Executable(value) => {
                 if let Draft::Custom(draft) = &mut self.scanner {
                     self.picker_token += 1;
@@ -309,6 +317,16 @@ impl State {
                     scan_dir: PathBuf::from(&self.scan_dir),
                     quarantine_dir: PathBuf::from(&self.quarantine_dir),
                     parallel: self.parallel.clone(),
+                    batch_mib: if matches!(self.scanner, Draft::Defender) {
+                        "1024".into()
+                    } else {
+                        self.batch_mib.clone()
+                    },
+                    timeout_minutes: if matches!(self.scanner, Draft::Defender) {
+                        "30".into()
+                    } else {
+                        self.timeout_minutes.clone()
+                    },
                     scanner,
                     tls: self.tls,
                 };
@@ -363,7 +381,7 @@ impl State {
             .spacing(5),
         ]
         .spacing(12);
-        let scanner = column![
+        let mut scanner = column![
             text("3  Scanner").size(21),
             row![
                 pick_list(
@@ -375,12 +393,37 @@ impl State {
                     Some(self.scanner.backend()),
                     Message::Backend
                 ),
-                field("Parallel scans (1–16)", &self.parallel, Message::Parallel).width(180)
+                field(
+                    if matches!(self.scanner, Draft::Defender) {
+                        "Parallel mails (1–16)"
+                    } else {
+                        "Parallel batches (1–16)"
+                    },
+                    &self.parallel,
+                    Message::Parallel
+                )
+                .width(180)
             ]
             .spacing(16),
             self.scanner_view(),
         ]
         .spacing(12);
+        if !matches!(self.scanner, Draft::Defender) {
+            scanner = scanner.push(
+                row![
+                    field("Batch target (MiB, 1–5120)", &self.batch_mib, Message::BatchMib),
+                    field("Batch timeout (minutes, 1–1440)", &self.timeout_minutes, Message::TimeoutMinutes),
+                ].spacing(16),
+            ).push(text("The target counts downloaded mail. The final smaller batch is scanned too; decoded attachments require extra disk space.").size(13));
+            if let (Ok(target), Ok(parallel)) =
+                (self.batch_mib.parse::<u64>(), self.parallel.parse::<u64>())
+                && (1..=5120).contains(&target)
+                && (1..=16).contains(&parallel)
+            {
+                let maximum = (parallel + 1) * (2 * target + 600);
+                scanner = scanner.push(text(format!("Working disk allowance: up to about {maximum} MiB at this concurrency, plus any retained files.")).size(13));
+            }
+        }
         let body =
             column![text("Mailbox Scanner").size(32), folders, account, scanner,].spacing(26);
         let mut footer = column![
@@ -411,7 +454,7 @@ impl State {
 
     fn scanner_view(&self) -> Element<'_, Message> {
         match &self.scanner {
-            Draft::Defender => text("Windows Defender is detected automatically. Files are scanned without remediation.").into(),
+            Draft::Defender => text("Windows Defender is detected automatically and scans each mail separately without remediation.").into(),
             Draft::Avast(settings) => column![
                 text("Avast is detected automatically. All file types are scanned."),
                 checkbox(settings.entire_files).label("Scan entire files").on_toggle(Message::EntireFiles),
@@ -434,14 +477,14 @@ impl State {
                         button("Browse scanner...").on_press(Message::PickExecutable).padding(10),
                     ].spacing(8),
                     text("Arguments (one row per argument)"),
-                    text("Use a separate {file} row for the input path. Do not add quotes around it; other rows are passed literally."),
+                    text("Use a separate {directory} row for the batch directory. Do not add quotes around it; other rows are passed literally."),
                     arguments,
                     button("Add argument").on_press(Message::AddArgument).padding(10),
                     row![
                         field("Clean exit code", &draft.clean_code, Message::CleanCode),
                         field("Detected exit code", &draft.detected_code, Message::DetectedCode),
                     ].spacing(16),
-                    text("Other exit codes or interrupted scans are reported as incomplete."),
+                    text("Emit UTF-8 lines: relative file path, TAB, CLEAN / DETECTED / ERROR, TAB, optional detail. Every file needs a result; exit codes alone cannot identify detections."),
                     text("Use a foreground CLI that stays open until scanning finishes. Configure it to scan all file types: it receives the original .eml and extracted .bin files."),
                     text("Choose non-remediating arguments. Toolbox cannot prevent a custom scanner from changing files or guarantee termination of processes it launches."),
                 ].spacing(10).into()
@@ -566,7 +609,7 @@ mod tests {
         let mut state = State::default();
         let _ = state.update(Message::Backend(scanner::Backend::Custom));
         assert!(
-            matches!(&state.scanner, Draft::Custom(draft) if draft.arguments == ["{file}"] && draft.clean_code == "0" && draft.detected_code == "1")
+            matches!(&state.scanner, Draft::Custom(draft) if draft.arguments == ["{directory}"] && draft.clean_code == "0" && draft.detected_code == "1")
         );
         let mut ui = iced_test::Simulator::with_size(
             iced::Settings::default(),
@@ -590,7 +633,7 @@ mod tests {
         let _ = state.update(Message::Argument(0, "ignored".into()));
         let _ = state.update(Message::Backend(scanner::Backend::Custom));
         assert!(
-            matches!(&state.scanner, Draft::Custom(draft) if draft.arguments == ["{file}"] && draft.clean_code == "0" && draft.executable.is_empty())
+            matches!(&state.scanner, Draft::Custom(draft) if draft.arguments == ["{directory}"] && draft.clean_code == "0" && draft.executable.is_empty())
         );
     }
 
@@ -611,16 +654,16 @@ mod tests {
         assert!(state.update(Message::Start).instruction.is_none());
         assert!(state.error.as_ref().unwrap().contains("different"));
         let _ = state.update(Message::DetectedCode(" 1 ".into()));
-        for argument in ["", "--file={file}"] {
+        for argument in ["", "--file={directory}"] {
             let _ = state.update(Message::Argument(0, argument.into()));
             assert!(state.update(Message::Start).instruction.is_none());
         }
-        let _ = state.update(Message::Argument(0, "{file}".into()));
+        let _ = state.update(Message::Argument(0, "{directory}".into()));
         let _ = state.update(Message::AddArgument);
         let Instruction::Begin(settings) = state.update(Message::Start).instruction.unwrap();
         let _ = state.update(Message::Argument(1, "later edit".into()));
         assert!(
-            matches!(settings.scanner(), scanner::Settings::Custom(custom) if custom.arguments == ["{file}", ""] && custom.clean_code == 0 && custom.detected_code == 1)
+            matches!(settings.scanner(), scanner::Settings::Custom(custom) if custom.arguments == ["{directory}", ""] && custom.clean_code == 0 && custom.detected_code == 1)
         );
         for executable in [
             "relative.exe".to_string(),
@@ -728,5 +771,30 @@ mod tests {
             );
         }
         println!("Scanner settings snapshots: {}", directory.display());
+    }
+
+    #[test]
+    fn batch_settings_are_exposed_only_for_directory_backends() {
+        let mut state = State::default();
+        let mut ui = iced_test::Simulator::with_size(
+            iced::Settings::default(),
+            (1180.0, 1000.0),
+            state.view(),
+        );
+        assert!(ui.find("Batch target (MiB, 1–5120)").is_err());
+        drop(ui);
+        let _ = state.update(Message::Backend(scanner::Backend::Avast));
+        let _ = state.update(Message::BatchMib("64".into()));
+        let _ = state.update(Message::TimeoutMinutes("10".into()));
+        assert_eq!(state.batch_mib, "64");
+        assert_eq!(state.timeout_minutes, "10");
+        assert_eq!(state.parallel, "1");
+        let mut ui = iced_test::Simulator::with_size(
+            iced::Settings::default(),
+            (1180.0, 1200.0),
+            state.view(),
+        );
+        assert!(ui.find("Batch target (MiB, 1–5120)").is_ok());
+        assert!(ui.find("Batch timeout (minutes, 1–1440)").is_ok());
     }
 }

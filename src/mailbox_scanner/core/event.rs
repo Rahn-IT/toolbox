@@ -8,7 +8,7 @@ use crate::mailbox_scanner::core::{detection, message};
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Counts {
     /// Downloaded messages waiting on disk for a scan slot.
-    pub queued: u8,
+    pub queued: u64,
     /// Snapshotted message UIDs.
     pub total: u64,
     /// Attempted messages that reached a terminal outcome.
@@ -22,7 +22,11 @@ pub struct Counts {
     /// Messages cancelled before processing.
     pub cancelled: u64,
     /// Reserved message jobs still active.
-    pub active: u8,
+    pub active: u64,
+    /// Directory batches currently scanning or delivering final results.
+    pub batches_active: u64,
+    /// Directory batches waiting for a scanner slot.
+    pub batches_queued: u64,
 }
 
 /// A run's terminal status, independent of progress percentage.
@@ -41,6 +45,21 @@ pub enum Finish {
 /// A progress or explicit-action event, containing no login password.
 #[derive(Debug, Clone)]
 pub enum Event {
+    /// Authoritative live or terminal inspection snapshot for one message.
+    MessageUpdated {
+        /// Stable original message identity.
+        identity: message::Identity,
+        /// Bounded display subject.
+        subject: String,
+        /// Bounded display sender.
+        sender: String,
+        /// Complete cumulative evidence; replaces the previous snapshot.
+        report: detection::Report,
+        /// Strictly increasing revision within this message's run.
+        revision: u64,
+        /// No later provisional snapshot may replace this result.
+        terminal: bool,
+    },
     /// Folder/UID discovery is underway; the final denominator is not known.
     Discovering,
     /// Latest authoritative progress snapshot and display folder.

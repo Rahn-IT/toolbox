@@ -41,8 +41,12 @@ pub struct Draft {
     pub quarantine_dir: PathBuf,
     /// Scanner-specific settings for this run.
     pub scanner: scanner::Settings,
-    /// Editable number of concurrent message scans.
+    /// Editable number of concurrent scanner jobs.
     pub parallel: String,
+    /// Editable raw-message target in MiB.
+    pub batch_mib: String,
+    /// Editable directory scan timeout in minutes.
+    pub timeout_minutes: String,
     /// Encrypted transport mode.
     pub tls: Tls,
 }
@@ -58,6 +62,8 @@ pub struct Settings {
     quarantine_dir: PathBuf,
     scanner: scanner::Settings,
     parallel: NonZeroU8,
+    batch_bytes: u64,
+    batch_timeout: std::time::Duration,
     tls: Tls,
 }
 
@@ -82,6 +88,12 @@ pub enum Error {
     /// Concurrency is outside the supported range.
     #[error("Parallel scans must be between 1 and 16")]
     Parallel,
+    /// Raw-message batch target is outside the supported range.
+    #[error("Batch size must be between 1 and 5120 MiB")]
+    BatchSize,
+    /// Batch timeout is outside the supported range.
+    #[error("Batch timeout must be between 1 and 1440 minutes")]
+    BatchTimeout,
 }
 
 impl Default for Draft {
@@ -94,7 +106,9 @@ impl Default for Draft {
             scan_dir: PathBuf::new(),
             quarantine_dir: PathBuf::new(),
             scanner: scanner::Settings::default(),
-            parallel: "4".into(),
+            parallel: "1".into(),
+            batch_mib: "1024".into(),
+            timeout_minutes: "30".into(),
             tls: Tls::Implicit,
         }
     }
@@ -165,6 +179,26 @@ impl TryFrom<Draft> for Settings {
         if parallel.get() > 16 {
             return Err(Error::Parallel);
         }
+        let batch_mib = draft
+            .batch_mib
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| Error::BatchSize)?;
+        if !(1..=5120).contains(&batch_mib) {
+            return Err(Error::BatchSize);
+        }
+        let batch_bytes = batch_mib.checked_mul(1024 * 1024).ok_or(Error::BatchSize)?;
+        let timeout_minutes = draft
+            .timeout_minutes
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| Error::BatchTimeout)?;
+        if !(1..=1440).contains(&timeout_minutes) {
+            return Err(Error::BatchTimeout);
+        }
+        let batch_timeout = std::time::Duration::from_secs(
+            timeout_minutes.checked_mul(60).ok_or(Error::BatchTimeout)?,
+        );
         draft.scanner.validate()?;
         Ok(Self {
             host: host.into(),
@@ -175,6 +209,8 @@ impl TryFrom<Draft> for Settings {
             quarantine_dir: draft.quarantine_dir,
             scanner: draft.scanner,
             parallel,
+            batch_bytes,
+            batch_timeout,
             tls: draft.tls,
         })
     }
@@ -221,9 +257,19 @@ impl Settings {
         &self.scanner
     }
 
-    /// Maximum concurrent message scans.
+    /// Maximum concurrent scanner jobs.
     pub fn parallel(&self) -> u8 {
         self.parallel.get()
+    }
+
+    /// Raw original-message bytes that close a batch after the crossing message.
+    pub fn batch_bytes(&self) -> u64 {
+        self.batch_bytes
+    }
+
+    /// Maximum scanner runtime for a directory batch, including startup.
+    pub fn batch_timeout(&self) -> std::time::Duration {
+        self.batch_timeout
     }
 
     /// Required encrypted transport mode.
@@ -254,6 +300,39 @@ mod tests {
         assert_eq!(settings.username(), "user@example.org");
         assert_eq!(settings.password(), " secret ");
         assert_eq!(settings.port(), 993);
+    }
+
+    #[test]
+    fn batch_settings_have_bounded_byte_targets_and_timeouts() {
+        let settings = Settings::try_from(draft()).unwrap();
+        assert_eq!(settings.batch_bytes(), 1024 * 1024 * 1024);
+        assert_eq!(
+            settings.batch_timeout(),
+            std::time::Duration::from_secs(30 * 60)
+        );
+        assert_eq!(settings.parallel(), 1);
+        for value in ["0", "5121", "-1", "18446744073709551615", "bad"] {
+            let mut input = draft();
+            input.batch_mib = value.into();
+            assert!(matches!(Settings::try_from(input), Err(Error::BatchSize)));
+        }
+        for value in ["0", "1441", "-1", "18446744073709551615", "bad"] {
+            let mut input = draft();
+            input.timeout_minutes = value.into();
+            assert!(matches!(
+                Settings::try_from(input),
+                Err(Error::BatchTimeout)
+            ));
+        }
+        let mut input = draft();
+        input.batch_mib = "5120".into();
+        input.timeout_minutes = "1440".into();
+        let settings = Settings::try_from(input).unwrap();
+        assert_eq!(settings.batch_bytes(), 5120 * 1024 * 1024);
+        assert_eq!(
+            settings.batch_timeout(),
+            std::time::Duration::from_secs(86400)
+        );
     }
 
     #[test]

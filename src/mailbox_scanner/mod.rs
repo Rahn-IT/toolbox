@@ -1,6 +1,7 @@
 //! Mailbox scanning desktop application.
 #![forbid(unsafe_code)]
 
+pub mod batch;
 pub mod core;
 pub mod mailbox;
 pub mod quarantine;

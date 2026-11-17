@@ -9,7 +9,7 @@ use super::Error;
 pub struct Settings {
     /// Absolute path to the native scanner executable.
     pub executable: PathBuf,
-    /// Literal arguments, including at least one standalone `{file}`.
+    /// Literal arguments, including at least one standalone `{directory}`.
     pub arguments: Vec<String>,
     /// Normal exit code indicating no detection.
     pub clean_code: i32,
@@ -39,11 +39,11 @@ impl Settings {
         if self.clean_code == self.detected_code {
             return Err(Error::ExitCodes);
         }
-        if !self.arguments.iter().any(|value| value == "{file}")
+        if !self.arguments.iter().any(|value| value == "{directory}")
             || self
                 .arguments
                 .iter()
-                .any(|value| value != "{file}" && value.contains("{file}"))
+                .any(|value| value != "{directory}" && value.contains("{directory}"))
         {
             return Err(Error::Placeholder);
         }
@@ -66,7 +66,7 @@ mod tests {
     fn settings() -> Settings {
         Settings {
             executable: std::env::current_dir().unwrap().join("scanner.EXE"),
-            arguments: vec!["{file}".into()],
+            arguments: vec!["{directory}".into()],
             clean_code: 0,
             detected_code: 1,
         }
@@ -85,8 +85,8 @@ mod tests {
         assert_eq!(input.validate(), Err(Error::ExitCodes));
         for arguments in [
             vec![],
-            vec!["--file={file}".into()],
-            vec!["{file}".into(), "\0".into()],
+            vec!["--file={directory}".into()],
+            vec!["{directory}".into(), "\0".into()],
         ] {
             input = settings();
             input.arguments = arguments;
