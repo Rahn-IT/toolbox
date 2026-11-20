@@ -24,7 +24,6 @@ use crate::mailbox_scanner::{
     mailbox, quarantine, scanner,
 };
 
-const MAX_UIDS: usize = 1_000_000;
 const MAX_DETECTIONS: u64 = 100_000;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -102,63 +101,69 @@ async fn execute(
     settings: &config::Settings,
     events: &mpsc::Sender<event::Event>,
     counts: &mut event::Counts,
-    mut cancel: watch::Receiver<bool>,
+    cancel: watch::Receiver<bool>,
 ) -> Result<event::Finish, Error> {
     if settings.backend() != crate::mailbox_scanner::core::scanner::Backend::Defender {
         return batches::execute(settings, events, counts, cancel).await;
     }
     let engine = scanner::Engine::resolve(settings)?;
+    execute_with(
+        settings,
+        events,
+        counts,
+        cancel,
+        &mut || mailbox::Client::connect(settings),
+        |pending, stopped| scan_job(pending, engine.clone(), stopped),
+    )
+    .await
+}
+
+async fn execute_with<T, C, F, S, J>(
+    settings: &config::Settings,
+    events: &mpsc::Sender<event::Event>,
+    counts: &mut event::Counts,
+    mut cancel: watch::Receiver<bool>,
+    connect: &mut C,
+    mut scan: S,
+) -> Result<event::Finish, Error>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
+    C: FnMut() -> F,
+    F: Future<Output = Result<mailbox::Client<T>, mailbox::Error>>,
+    S: FnMut(Pending, watch::Receiver<bool>) -> J,
+    J: Future<Output = Job> + Send + 'static,
+{
     let scan_root = prepare(settings.scan_dir())?;
     prepare(settings.quarantine_dir())?;
     if events.send(event::Event::Discovering).await.is_err() {
         return Err(Error::Cancelled);
     }
-    let mut client = tokio::select! { _ = cancelled(&mut cancel) => return Err(Error::Cancelled), result = mailbox::Client::connect(settings) => result? };
-    let folders = tokio::select! { _ = cancelled(&mut cancel) => return Err(Error::Cancelled), result = client.folders() => result? };
-    let mut snapshots = Vec::new();
-    let mut total = 0;
-    let mut partial = false;
-    for folder in folders {
-        if *cancel.borrow() {
-            return Err(Error::Cancelled);
-        }
+    let mut client = crate::mailbox_scanner::worker::Worker::new(settings);
+    let discovery = tokio::select! {
+        _ = events.closed() => return Err(Error::Cancelled),
+        _ = cancelled(&mut cancel) => return Err(Error::Cancelled),
+        result = client.discover_with(connect) => result,
+    };
+    let snapshots = discovery.snapshots;
+    let mut partial = discovery.error.is_some();
+    if let Some(error) = discovery.error {
+        client.stop();
         let _ = events
-            .send(event::Event::Progress {
-                counts: *counts,
-                folder: Some(format!("Discovering {}", folder.display())),
+            .send(event::Event::Diagnostic {
+                context: "Discovery stopped".into(),
+                detail: error.to_string(),
             })
             .await;
-        let result = tokio::select! { _ = cancelled(&mut cancel) => return Err(Error::Cancelled), result = client.snapshot(&folder) => result };
-        match result {
-            Ok(snapshot) => {
-                if total + snapshot.uids.len() > MAX_UIDS {
-                    partial = true;
-                    let _ = events
-                        .send(event::Event::Diagnostic {
-                            context: "Discovery limit".into(),
-                            detail: "The run exceeds 1,000,000 messages. Scan is partial.".into(),
-                        })
-                        .await;
-                    break;
-                }
-                total += snapshot.uids.len();
-                snapshots.push(snapshot);
-            }
-            Err(error) => {
-                partial = true;
-                let _ = events
-                    .send(event::Event::Diagnostic {
-                        context: folder.display().into(),
-                        detail: error.to_string(),
-                    })
-                    .await;
-                client = tokio::select! { _ = cancelled(&mut cancel) => return Err(Error::Cancelled), result = mailbox::Client::connect(settings) => result? };
-            }
-        }
     }
-    counts.total = total as u64;
+    counts.total = snapshots
+        .iter()
+        .map(|snapshot| snapshot.uids.len() as u64)
+        .sum();
+    if partial {
+        counts.cancelled = counts.total;
+        return Ok(event::Finish::Partial);
+    }
     let session = unique_directory(&scan_root, "mailbox-scan")?;
-    let account = message::Account::from_settings(settings);
     let (stop, stopped) = watch::channel(false);
     let mut jobs = JoinSet::new();
     let parallel = settings.parallel() as usize;
@@ -167,20 +172,27 @@ async fn execute(
     let mut aborted = false;
     let mut limit = false;
     'folders: for snapshot in snapshots {
-        for uid in snapshot.uids {
+        let folder = snapshot.folder.clone();
+        client.begin(snapshot);
+        while client.remaining() > 0 {
             if *cancel.borrow() || events.is_closed() {
                 aborted = true;
                 break 'folders;
             }
             dispatch(&mut queue, &mut jobs, parallel, counts, |pending| {
-                scan_job(pending, engine.clone(), stopped.clone())
+                scan(pending, stopped.clone())
             });
             while queue.len() >= capacity {
                 tokio::select! {
+                    _ = events.closed() => { aborted = true; break 'folders; }
                     _ = cancelled(&mut cancel) => { aborted = true; break 'folders; }
                     joined = jobs.join_next() => {
-                        if let Some(joined) = joined { partial |= publish(joined, events, counts).await; }
-                        dispatch(&mut queue, &mut jobs, parallel, counts, |pending| scan_job(pending, engine.clone(), stopped.clone()));
+                        if let Some(joined) = joined {
+                            let (incomplete, stopped) = publish_serviced(publish(joined, events, counts), events, &mut cancel, &mut client, &stop).await;
+                            partial |= incomplete; aborted |= stopped;
+                        }
+                        if aborted { break 'folders; }
+                        dispatch(&mut queue, &mut jobs, parallel, counts, |pending| scan(pending, stopped.clone()));
                         progress(events, counts);
                     }
                 }
@@ -193,30 +205,38 @@ async fn execute(
                 limit = true;
                 break 'folders;
             }
-            let identity = message::Identity::new(
-                account.clone(),
-                snapshot.folder.clone(),
-                snapshot.uidvalidity,
-                uid,
-            );
             let fetched = {
-                let fetch = async {
-                    client.open(&identity, false).await?;
-                    client.fetch(&identity).await
-                };
-                tokio::pin!(fetch);
+                let mut fetch = Box::pin(client.next_with(connect));
                 loop {
                     tokio::select! {
+                        _ = events.closed() => { aborted = true; break 'folders; }
                         _ = cancelled(&mut cancel) => { aborted = true; break 'folders; }
                         result = &mut fetch => break result,
                         joined = jobs.join_next(), if !jobs.is_empty() => {
-                            if let Some(joined) = joined { partial |= publish(joined, events, counts).await; }
-                            dispatch(&mut queue, &mut jobs, parallel, counts, |pending| scan_job(pending, engine.clone(), stopped.clone()));
+                            if let Some(joined) = joined {
+                                let publication = publish(joined, events, counts);
+                                tokio::pin!(publication);
+                                tokio::select! {
+                                    incomplete = &mut publication => partial |= incomplete,
+                                    _ = cancelled(&mut cancel) => {
+                                        drop(fetch); client.stop(); let _ = stop.send(true);
+                                        partial |= publication.await; aborted = true; break 'folders;
+                                    }
+                                    _ = events.closed() => {
+                                        drop(fetch); client.stop(); let _ = stop.send(true);
+                                        partial |= publication.await; aborted = true; break 'folders;
+                                    }
+                                }
+                            }
+                            dispatch(&mut queue, &mut jobs, parallel, counts, |pending| scan(pending, stopped.clone()));
                             progress(events, counts);
                             if counts.detected >= MAX_DETECTIONS { limit = true; break 'folders; }
                         }
                     }
                 }
+            };
+            let Some((identity, fetched)) = fetched else {
+                break;
             };
             match fetched {
                 Ok(bytes) => {
@@ -226,16 +246,21 @@ async fn execute(
                         tokio::pin!(write);
                         loop {
                             tokio::select! {
+                                _ = events.closed(), if !aborted => { aborted = true; client.stop(); let _ = stop.send(true); }
                                 pending = &mut write => break pending,
                                 _ = cancelled(&mut cancel), if !aborted => {
                                     aborted = true;
+                                    client.stop();
                                     let _ = stop.send(true);
                                 }
                                 joined = jobs.join_next(), if !jobs.is_empty() => {
-                                    if let Some(joined) = joined { partial |= publish(joined, events, counts).await; }
+                                    if let Some(joined) = joined {
+                                        let (incomplete, stopped) = publish_serviced(publish(joined, events, counts), events, &mut cancel, &mut client, &stop).await;
+                                        partial |= incomplete; aborted |= stopped;
+                                    }
                                     if counts.detected >= MAX_DETECTIONS { limit = true; }
                                     if !aborted && !limit {
-                                        dispatch(&mut queue, &mut jobs, parallel, counts, |pending| scan_job(pending, engine.clone(), stopped.clone()));
+                                        dispatch(&mut queue, &mut jobs, parallel, counts, |pending| scan(pending, stopped.clone()));
                                         progress(events, counts);
                                     }
                                 }
@@ -248,7 +273,7 @@ async fn execute(
                         break 'folders;
                     }
                     dispatch(&mut queue, &mut jobs, parallel, counts, |pending| {
-                        scan_job(pending, engine.clone(), stopped.clone())
+                        scan(pending, stopped.clone())
                     });
                 }
                 Err(error) => {
@@ -259,51 +284,53 @@ async fn execute(
                             | mailbox::Error::ReadOnly
                             | mailbox::Error::Rejected {
                                 operation: "folder selection",
-                                ..
+                                status: "NO"
                             }
                     );
-                    match error {
+                    let fatal =
+                        !skip_folder && !crate::mailbox_scanner::worker::terminal_message(&error);
+                    let terminal = match error {
                         mailbox::Error::Missing => {
                             counts.vanished += 1;
-                            let _ = events.send(event::Event::Vanished(identity)).await;
+                            event::Event::Vanished(identity)
                         }
                         _ => {
                             partial = true;
                             counts.incomplete += 1;
-                            let _ = events
-                                .send(event::Event::Diagnostic {
-                                    context: snapshot.folder.display().into(),
-                                    detail: error.to_string(),
-                                })
-                                .await;
+                            event::Event::Diagnostic {
+                                context: folder.display().into(),
+                                detail: error.to_string(),
+                            }
                         }
-                    }
-                    match tokio::select! { _ = cancelled(&mut cancel) => { aborted = true; break 'folders; }, result = mailbox::Client::connect(settings) => result }
-                    {
-                        Ok(connection) => client = connection,
-                        Err(error) => {
-                            partial = true;
-                            let _ = events
-                                .send(event::Event::Diagnostic {
-                                    context: "Reconnect".into(),
-                                    detail: error.to_string(),
-                                })
-                                .await;
-                            break 'folders;
-                        }
+                    };
+                    let (_, stopped) = publish_serviced(
+                        events.send(terminal),
+                        events,
+                        &mut cancel,
+                        &mut client,
+                        &stop,
+                    )
+                    .await;
+                    aborted |= stopped;
+                    if fatal || aborted {
+                        break 'folders;
                     }
                     if skip_folder {
+                        let remaining = client.remaining() as u64;
+                        counts.processed += remaining;
+                        counts.incomplete += remaining;
                         continue 'folders;
                     }
                 }
             }
-            let _ = events
-                .send(event::Event::Progress {
-                    counts: *counts,
-                    folder: Some(snapshot.folder.display().into()),
-                })
-                .await;
+            let _ = events.try_send(event::Event::Progress {
+                counts: *counts,
+                folder: Some(folder.display().into()),
+            });
         }
+    }
+    if aborted || limit || client.remaining() > 0 {
+        client.stop();
     }
     if aborted {
         let _ = stop.send(true);
@@ -311,14 +338,18 @@ async fn execute(
     while !jobs.is_empty() || (!queue.is_empty() && !aborted && !limit) {
         if !aborted && !limit {
             dispatch(&mut queue, &mut jobs, parallel, counts, |pending| {
-                scan_job(pending, engine.clone(), stopped.clone())
+                scan(pending, stopped.clone())
             });
             progress(events, counts);
         }
         tokio::select! {
-            _ = cancelled(&mut cancel), if !aborted => { aborted = true; let _ = stop.send(true); }
+            _ = events.closed(), if !aborted => { aborted = true; client.stop(); let _ = stop.send(true); }
+            _ = cancelled(&mut cancel), if !aborted => { aborted = true; client.stop(); let _ = stop.send(true); }
             joined = jobs.join_next() => {
-                if let Some(joined) = joined { partial |= publish(joined, events, counts).await; }
+                if let Some(joined) = joined {
+                    let (incomplete, stopped) = publish_serviced(publish(joined, events, counts), events, &mut cancel, &mut client, &stop).await;
+                    partial |= incomplete; aborted |= stopped;
+                }
                 if counts.detected >= MAX_DETECTIONS { limit = true; }
             }
         }
@@ -475,6 +506,31 @@ async fn cleanup(files: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     leftovers
+}
+
+async fn publish_serviced<T, F>(
+    publication: F,
+    events: &mpsc::Sender<event::Event>,
+    cancel: &mut watch::Receiver<bool>,
+    client: &mut crate::mailbox_scanner::worker::Worker<'_, T>,
+    stop: &watch::Sender<bool>,
+) -> (F::Output, bool)
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
+    F: Future,
+{
+    tokio::pin!(publication);
+    tokio::select! {
+        incomplete = &mut publication => (incomplete, false),
+        _ = cancelled(cancel) => {
+            client.stop(); let _ = stop.send(true);
+            (publication.await, true)
+        }
+        _ = events.closed() => {
+            client.stop(); let _ = stop.send(true);
+            (publication.await, true)
+        }
+    }
 }
 
 async fn publish(
@@ -747,6 +803,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    mod integration;
     use super::*;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 

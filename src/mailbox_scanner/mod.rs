@@ -6,6 +6,7 @@ pub mod core;
 pub mod mailbox;
 pub mod quarantine;
 pub mod scanner;
+mod worker;
 pub mod workflow;
 
 mod action;

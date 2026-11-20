@@ -7,10 +7,10 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-use crate::mailbox_scanner::core::{config, detection, event, message};
+use crate::mailbox_scanner::core::{config, detection, event};
 use crate::mailbox_scanner::{batch, mailbox, scanner};
 
-use super::{Error, MAX_DETECTIONS, MAX_UIDS, cancelled, prepare, unique_directory};
+use super::{Error, MAX_DETECTIONS, cancelled, prepare, unique_directory};
 
 struct Active {
     batch: Arc<batch::Batch>,
@@ -317,55 +317,59 @@ pub(super) async fn execute(
     settings: &config::Settings,
     events: &mpsc::Sender<event::Event>,
     counts: &mut event::Counts,
-    mut cancel: watch::Receiver<bool>,
+    cancel: watch::Receiver<bool>,
 ) -> Result<event::Finish, Error> {
     let engine = scanner::Engine::resolve(settings)?;
+    execute_with(settings, events, counts, cancel, engine, &mut || {
+        mailbox::Client::connect(settings)
+    })
+    .await
+}
+
+async fn execute_with<T, C, F>(
+    settings: &config::Settings,
+    events: &mpsc::Sender<event::Event>,
+    counts: &mut event::Counts,
+    mut cancel: watch::Receiver<bool>,
+    engine: scanner::Engine,
+    connect: &mut C,
+) -> Result<event::Finish, Error>
+where
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + std::fmt::Debug + Send,
+    C: FnMut() -> F,
+    F: Future<Output = Result<mailbox::Client<T>, mailbox::Error>>,
+{
     let root = prepare(settings.scan_dir())?;
     prepare(settings.quarantine_dir())?;
     if events.send(event::Event::Discovering).await.is_err() {
         return Err(Error::Cancelled);
     }
-    let mut client = tokio::select! {
+    let mut client = crate::mailbox_scanner::worker::Worker::new(settings);
+    let discovery = tokio::select! {
+        _ = events.closed() => return Err(Error::Cancelled),
         _ = cancelled(&mut cancel) => return Err(Error::Cancelled),
-        result = mailbox::Client::connect(settings) => result?,
+        result = client.discover_with(connect) => result,
     };
-    let folders = tokio::select! {
-        _ = cancelled(&mut cancel) => return Err(Error::Cancelled),
-        result = client.folders() => result?,
-    };
-    let mut snapshots = Vec::new();
-    let mut total = 0;
-    let mut partial = false;
-    for folder in folders {
-        let result = tokio::select! {
-            _ = cancelled(&mut cancel) => return Err(Error::Cancelled),
-            result = client.snapshot(&folder) => result,
-        };
-        match result {
-            Ok(snapshot) => {
-                if total + snapshot.uids.len() > MAX_UIDS {
-                    partial = true;
-                    break;
-                }
-                total += snapshot.uids.len();
-                snapshots.push(snapshot);
-            }
-            Err(error) => {
-                partial = true;
-                let _ = events.try_send(event::Event::Diagnostic {
-                    context: folder.display().into(),
-                    detail: error.to_string(),
-                });
-                client = tokio::select! {
-                    _ = cancelled(&mut cancel) => return Err(Error::Cancelled),
-                    result = mailbox::Client::connect(settings) => result?,
-                };
-            }
-        }
+    let snapshots = discovery.snapshots;
+    let partial = discovery.error.is_some();
+    if let Some(error) = discovery.error {
+        client.stop();
+        let _ = events
+            .send(event::Event::Diagnostic {
+                context: "Discovery stopped".into(),
+                detail: error.to_string(),
+            })
+            .await;
     }
-    counts.total = total as u64;
+    counts.total = snapshots
+        .iter()
+        .map(|snapshot| snapshot.uids.len() as u64)
+        .sum();
+    if partial {
+        counts.cancelled = counts.total;
+        return Ok(event::Finish::Partial);
+    }
     let session = unique_directory(&root, "mailbox-scan")?;
-    let account = message::Account::from_settings(settings);
     let (stop, stopped) = watch::channel(false);
     let mut run = Run {
         events,
@@ -391,7 +395,9 @@ pub(super) async fn execute(
     let parallel = settings.parallel() as usize;
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     'folders: for snapshot in snapshots {
-        for uid in snapshot.uids {
+        let folder = snapshot.folder.clone();
+        client.begin(snapshot);
+        while client.remaining() > 0 {
             run.service().await;
             if *cancel.borrow() || cancel.has_changed().is_err() || events.is_closed() {
                 run.stop();
@@ -432,17 +438,8 @@ pub(super) async fn execute(
                     }
                 };
             }
-            let identity = message::Identity::new(
-                account.clone(),
-                snapshot.folder.clone(),
-                snapshot.uidvalidity,
-                uid,
-            );
             let fetched = {
-                let fetch = async {
-                    client.open(&identity, false).await?;
-                    client.fetch(&identity).await
-                };
+                let fetch = client.next_with(connect);
                 tokio::pin!(fetch);
                 loop {
                     tokio::select! {
@@ -451,6 +448,9 @@ pub(super) async fn execute(
                         _ = tick.tick() => { run.service().await; if run.aborted || run.halted { break 'folders; } }
                     }
                 }
+            };
+            let Some((identity, fetched)) = fetched else {
+                break;
             };
             match fetched {
                 Ok(bytes) => {
@@ -461,10 +461,10 @@ pub(super) async fn execute(
                     let result = loop {
                         tokio::select! {
                             result = &mut add => break result,
-                            _ = cancelled(&mut cancel), if !run.aborted => { run.aborted = true; let _ = run.stop.send(true); }
+                            _ = cancelled(&mut cancel), if !run.aborted => { run.aborted = true; client.stop(); let _ = run.stop.send(true); }
                             _ = tick.tick() => {
                                 run.service().await;
-                                if events.is_closed() { run.aborted = true; let _ = run.stop.send(true); }
+                                if events.is_closed() { run.aborted = true; client.stop(); let _ = run.stop.send(true); }
                             }
                         }
                     };
@@ -481,34 +481,22 @@ pub(super) async fn execute(
                             | mailbox::Error::ReadOnly
                             | mailbox::Error::Rejected {
                                 operation: "folder selection",
-                                ..
+                                status: "NO"
                             }
                     );
                     if matches!(error, mailbox::Error::Missing) {
                         run.counts.vanished += 1;
                     } else {
                         run.counts.incomplete += 1;
-                        run.diagnostic(snapshot.folder.display(), error.to_string());
+                        run.diagnostic(folder.display(), error.to_string());
                     }
-                    let reconnect = {
-                        let connect = mailbox::Client::connect(settings);
-                        tokio::pin!(connect);
-                        loop {
-                            tokio::select! {
-                                _ = cancelled(&mut cancel) => { run.stop(); break 'folders; }
-                                result = &mut connect => break result,
-                                _ = tick.tick() => { run.service().await; if run.aborted || run.halted { break 'folders; } }
-                            }
-                        }
-                    };
-                    match reconnect {
-                        Ok(connection) => client = connection,
-                        Err(error) => {
-                            run.diagnostic("Reconnect", error.to_string());
-                            break 'folders;
-                        }
+                    if !skip_folder && !crate::mailbox_scanner::worker::terminal_message(&error) {
+                        break 'folders;
                     }
                     if skip_folder {
+                        let remaining = client.remaining() as u64;
+                        run.counts.processed += remaining;
+                        run.counts.incomplete += remaining;
                         continue 'folders;
                     }
                 }
@@ -518,13 +506,14 @@ pub(super) async fn execute(
                 .map_or(0, |builder| builder.retained().messages().len() as u64);
             let _ = events.try_send(event::Event::Progress {
                 counts: *run.counts,
-                folder: Some(snapshot.folder.display().into()),
+                folder: Some(folder.display().into()),
             });
         }
     }
     if *cancel.borrow() || cancel.has_changed().is_err() || events.is_closed() {
         run.stop();
     }
+    client.stop();
     // EOF and download failure flush a nonempty remainder; cancellation never launches it.
     if let Some(builder) = filling.take() {
         run.flush(builder, parallel, &mut cancel).await;
@@ -544,9 +533,6 @@ pub(super) async fn execute(
         run.diagnostic("Temporary cleanup", error.to_string());
         let _ = events.send(event::Event::Leftover(session)).await;
     }
-    if !run.aborted {
-        let _ = client.logout().await;
-    }
     Ok(if run.aborted {
         event::Finish::Cancelled
     } else if run.partial || run.halted || run.counts.incomplete > 0 || run.counts.cancelled > 0 {
@@ -558,7 +544,10 @@ pub(super) async fn execute(
 
 #[cfg(all(test, windows))]
 mod tests {
+    #[cfg(windows)]
+    mod integration;
     use super::*;
+    use crate::mailbox_scanner::core::message;
     use std::num::NonZeroU32;
 
     fn settings() -> config::Settings {

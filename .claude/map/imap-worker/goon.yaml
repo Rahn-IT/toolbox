@@ -1,0 +1,69 @@
+# Local MAP tracking; no GitHub issue/project changes requested.
+project: toolbox
+description: Shared IMAP reconnect loop with bounded single-connection pipelining
+repo: Rahn-IT/toolbox
+milestone: none
+default_branch: master
+tracking: local
+handoff:
+  dir: .claude/map/imap-worker
+  prefix: SESSION_HANDOFF
+workspace:
+  - name: toolbox
+    path: .
+    role: Single Rust executable with iced GUI and mailbox scanner
+checklist:
+  quick:
+    - cargo fmt --check
+    - cargo check --locked --offline
+  verify:
+    - cargo test --locked mailbox_scanner
+    - cargo test --locked -- --test-threads=2 --quiet
+  lint:
+    - cargo clippy --locked --all-targets
+key_files:
+  - AGENTS.md
+  - .claude/map/imap-worker/MAP_PLAN.md
+  - .claude/map/imap-worker/MAP_PHASE_1.md
+  - Cargo.toml
+  - src/mailbox_scanner/mailbox.rs
+  - src/mailbox_scanner/workflow.rs
+  - src/mailbox_scanner/workflow/batches.rs
+  - src/mailbox_scanner/batch.rs
+  - src/mailbox_scanner/core/event.rs
+  - src/mailbox_scanner/core/message.rs
+  - src/mailbox_scanner/core/limits.rs
+  - src/mailbox_scanner/scan.rs
+style:
+  - Follow AGENTS.md and installed Rust/OPAQUE guides; use a small scheduling enum only where it improves clarity; no executor or event framework.
+  - Typed errors, one scoped session owner, connection-independent progress and direct awaited staging.
+  - No unsafe, new dependencies, README changes or unrelated refactoring.
+workflow:
+  - User authorized implementation on 2026-11-20 after fresh regular and expert critique.
+  - Local tracking; no automatic commits or pushes.
+  - No performance measurements or benchmarks.
+  - No multiple IMAP connections, persistent restart resume or direct-to-file network download.
+  - Keep manual save/purge serial and preserve mutation safeguards.
+  - Phase order is 1 then 2 then 3 then 4; each phase must compile and preserve usable scan paths.
+  - Keep scanner progress serviced during connection/retry work; preparation cancellation must settle owned writes.
+  - Use injected time for deterministic tests; do not add Tokio test-util merely for clock control.
+  - Release build follows MAP_PHASE_4.md and CI with invocation-local static CRT RUSTFLAGS.
+  - No CLAUDE.md or MEMORY.md was found; AGENTS.md is authoritative.
+baseline:
+  - On 2026-11-20 cargo 1.100.0 worked through the default toolchain.
+  - cargo check --locked --offline passed.
+  - cargo fmt --check reports the pre-existing src/quick_install/discord.rs formatting difference.
+  - No application source changed during this MAP; full tests and release build were not rerun for planning.
+review_status:
+  directional: approved
+  regular: approved_round_2
+  foss: complete_with_mbsync_source_access_limitation
+  expert: approved_fresh_simplified_review_after_retry_fix
+  cross_reference: complete_after_simplification
+  simplification: approved
+  fresh_critique: approved_after_uidvalidity_fix
+phase_status:
+  phase_1: complete
+  phase_2: complete
+  phase_3: complete
+  phase_4: complete

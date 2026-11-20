@@ -1,5 +1,7 @@
 //! Certificate-checked IMAP access with UID identity and tagged acknowledgments.
 
+mod transport;
+
 use std::collections::HashSet;
 use std::fmt;
 use std::num::NonZeroU32;
@@ -39,12 +41,19 @@ pub enum Error {
         operation: &'static str,
         status: &'static str,
     },
+    #[error("IMAP server sent an untagged rejection during {operation}: {status}")]
+    Unsolicited {
+        operation: &'static str,
+        status: &'static str,
+    },
     #[error("Unexpected IMAP response: {0}")]
     Unexpected(&'static str),
     #[error("The mailbox UIDVALIDITY changed; scan this folder again")]
     Stale,
     #[error("The message is no longer in its original IMAP folder")]
     Missing,
+    #[error("The server did not return the requested body")]
+    MissingBody,
     #[error("Message exceeds the 200 MiB limit ({0} bytes)")]
     Oversize(u64),
     #[error("The server did not provide a reliable message size")]
@@ -61,6 +70,41 @@ pub enum Error {
     UnsupportedPurge,
     #[error("The selected folder is read-only")]
     ReadOnly,
+}
+
+impl Error {
+    /// Retry transport interruptions, never parser failures or credential rejection.
+    pub fn retryable(&self) -> bool {
+        fn io(error: &std::io::Error) -> bool {
+            if error
+                .get_ref()
+                .is_some_and(|source| source.is::<rustls::Error>())
+            {
+                return false;
+            }
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::ConnectionRefused
+                    | std::io::ErrorKind::NotConnected
+                    | std::io::ErrorKind::Interrupted
+            )
+        }
+        match self {
+            Self::Io(error) => io(error),
+            Self::Imap(error) | Self::Authentication(error) => match error {
+                async_imap::error::Error::Io(error) => io(error),
+                async_imap::error::Error::ConnectionLost => true,
+                _ => false,
+            },
+            Self::Disconnected | Self::Timeout(_) => true,
+            _ => false,
+        }
+    }
 }
 
 /// Stable UIDs captured from one examined folder.
@@ -88,7 +132,7 @@ pub struct Client<T = tokio_rustls::client::TlsStream<TcpStream>>
 where
     T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
 {
-    session: Option<async_imap::Session<T>>,
+    session: Option<async_imap::Session<transport::Tracked<T>>>,
     account: message::Account,
     selected: Option<Selected>,
     purge: bool,
@@ -102,7 +146,7 @@ impl Client<tokio::io::DuplexStream> {
         account: message::Account,
         purge: bool,
     ) -> Result<Self, Error> {
-        let mut client = async_imap::Client::new(stream);
+        let mut client = async_imap::Client::new(transport::Tracked::new(stream));
         greeting(&mut client).await?;
         let session = client
             .login("user", "password")
@@ -137,7 +181,7 @@ impl Client {
         let mut client = match settings.tls() {
             config::Tls::Implicit => {
                 let stream = deadline("TLS handshake", connector.connect(name, tcp)).await??;
-                let mut client = async_imap::Client::new(stream);
+                let mut client = async_imap::Client::new(transport::Tracked::new(stream));
                 greeting(&mut client).await?;
                 client
             }
@@ -155,7 +199,7 @@ impl Client {
                 )
                 .await??;
                 // STARTTLS upgrades the existing session: there is no second greeting.
-                async_imap::Client::new(stream)
+                async_imap::Client::new(transport::Tracked::new(stream))
             }
         };
         deadline(
@@ -184,6 +228,87 @@ impl<T> Client<T>
 where
     T: AsyncRead + AsyncWrite + Unpin + fmt::Debug + Send,
 {
+    /// Send one bounded pipeline command. Interrupted writes invalidate the session.
+    pub(crate) async fn send(&mut self, command: &str) -> Result<String, Error> {
+        let mut session = self.session.take().ok_or(Error::Disconnected)?;
+        let tag = deadline("command write", session.run_command(command)).await??;
+        self.session = Some(session);
+        Ok(tag.0)
+    }
+
+    /// Read one response without losing parser state when the read is paused.
+    pub(crate) async fn response<R>(
+        &mut self,
+        limit: tokio::time::Instant,
+        receive: impl FnOnce(&imap_proto::Response<'_>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        self.response_with_idle(limit, Duration::from_secs(60), receive)
+            .await
+    }
+
+    pub(crate) async fn response_with_idle<R>(
+        &mut self,
+        limit: tokio::time::Instant,
+        idle: Duration,
+        receive: impl FnOnce(&imap_proto::Response<'_>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        use std::sync::atomic::Ordering;
+        let session = self.session.as_mut().ok_or(Error::Disconnected)?;
+        let activity = session.get_ref().activity();
+        let mut bytes = activity.load(Ordering::Relaxed);
+        let mut last = tokio::time::Instant::now();
+        let read = session.read_response();
+        tokio::pin!(read);
+        let mut tick = tokio::time::interval(Duration::from_millis(100).min(idle / 4));
+        loop {
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(limit) => return Err(Error::Timeout("request completion")),
+                result = &mut read => return receive(result?.ok_or(Error::Disconnected)?.parsed()),
+                _ = tick.tick() => {
+                    let current = activity.load(Ordering::Relaxed);
+                    if current != bytes { bytes = current; last = tokio::time::Instant::now(); }
+                    if last.elapsed() >= idle { return Err(Error::Timeout("body inactivity")); }
+                }
+            }
+        }
+    }
+
+    /// Fetch a bounded metadata window without publishing provisional sizes.
+    pub(crate) async fn sizes(
+        &mut self,
+        identities: &[message::Identity],
+    ) -> Result<Vec<Option<usize>>, Error> {
+        let mut sizes = vec![None; identities.len()];
+        let set = identities
+            .iter()
+            .map(|identity| identity.uid().to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        self.command(
+            "message size",
+            &format!("UID FETCH {set} (UID RFC822.SIZE)"),
+            |response| {
+                if let imap_proto::Response::Fetch(_, attributes) = response {
+                    let uid = response_uid(attributes)?;
+                    for attribute in attributes {
+                        if let imap_proto::AttributeValue::Rfc822Size(size) = attribute {
+                            let index = identities
+                                .iter()
+                                .position(|identity| Some(identity.uid()) == uid)
+                                .ok_or(Error::Unexpected("foreign metadata UID"))?;
+                            if sizes[index].replace(*size as usize).is_some() {
+                                return Err(Error::Unexpected("duplicate message size"));
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            },
+        )
+        .await?;
+        Ok(sizes)
+    }
     /// Whether this authenticated server supports targeted UID expunge.
     pub fn supports_purge(&self) -> bool {
         self.purge
@@ -453,6 +578,7 @@ where
             let origin = bytes.len();
             let length = CHUNK.min(size - origin);
             let mut found = false;
+            let mut missing = false;
             self.command(
                 "message body",
                 &format!("UID FETCH {uid} (UID BODY.PEEK[]<{origin}.{length}>)"),
@@ -476,16 +602,18 @@ where
                                         "wrong or duplicate partial body origin",
                                     ));
                                 }
-                                let data = data
-                                    .as_deref()
-                                    .ok_or(Error::Unexpected("NIL message body"))?;
+                                found = true;
+                                let Some(data) = data.as_deref() else {
+                                    // NIL is provisional until the tagged command outcome arrives.
+                                    missing = true;
+                                    continue;
+                                };
                                 if data.len() != length {
                                     return Err(Error::Unexpected(
                                         "truncated or oversized body chunk",
                                     ));
                                 }
                                 bytes.extend_from_slice(data);
-                                found = true;
                             }
                         }
                     }
@@ -493,11 +621,14 @@ where
                 },
             )
             .await?;
+            if missing {
+                return Err(Error::MissingBody);
+            }
             if !found {
                 return Err(if self.flags(identity).await?.is_none() {
                     Error::Missing
                 } else {
-                    Error::Unexpected("missing requested body")
+                    Error::MissingBody
                 });
             }
         }
@@ -554,7 +685,7 @@ where
                 if let imap_proto::Response::Data { status, .. } = response
                     && matches!(status, imap_proto::Status::No | imap_proto::Status::Bad)
                 {
-                    return Err(Error::Rejected {
+                    return Err(Error::Unsolicited {
                         operation,
                         status: status_name(status),
                     });
@@ -715,6 +846,7 @@ fn decode_folder(wire: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::transport;
     use std::num::NonZeroU32;
 
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, DuplexStream};
@@ -912,7 +1044,7 @@ mod tests {
         .await;
         assert!(matches!(
             client.folders().await,
-            Err(Error::Rejected {
+            Err(Error::Unsolicited {
                 operation: "folder listing",
                 ..
             })
@@ -988,6 +1120,39 @@ mod tests {
         ));
         assert!(client.session.is_none());
         peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn nil_body_requires_tagged_success_before_reconciliation() {
+        for (reply, outcome) in [
+            ("* 2 FETCH (UID 9 BODY[]<0> NIL)\r\n{tag} OK fetched\r\n", 0),
+            (
+                "* 2 FETCH (UID 9 BODY[]<0> NIL)\r\n{tag} BAD invalid request\r\n",
+                1,
+            ),
+            ("* 2 FETCH (UID 9 BODY[]<0> NIL)\r\n", 2),
+        ] {
+            let (mut client, peer) = scripted(vec![
+                EXAMINE,
+                SIZE,
+                ("UID FETCH 9 (UID BODY.PEEK[]<0.4>)", reply),
+            ])
+            .await;
+            client.open(&identity(), false).await.unwrap();
+            let error = client.fetch(&identity()).await.unwrap_err();
+            match outcome {
+                0 => assert!(matches!(error, Error::MissingBody)),
+                1 => assert!(matches!(
+                    error,
+                    Error::Rejected {
+                        operation: "message body",
+                        status: "BAD"
+                    }
+                )),
+                _ => assert!(error.retryable(), "expected transport failure, got {error}"),
+            }
+            peer.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1097,7 +1262,7 @@ mod tests {
         peer.write_all(b"* PREAUTH already authenticated\r\n")
             .await
             .unwrap();
-        let mut client = async_imap::Client::new(stream);
+        let mut client = async_imap::Client::new(transport::Tracked::new(stream));
         assert!(matches!(
             greeting(&mut client).await,
             Err(Error::Unexpected(
@@ -1124,7 +1289,7 @@ mod tests {
             line.clear();
             assert_eq!(peer.read_line(&mut line).await.unwrap(), 0);
         });
-        let mut raw = async_imap::Client::new(stream);
+        let mut raw = async_imap::Client::new(transport::Tracked::new(stream));
         greeting(&mut raw).await.unwrap();
         let session = raw.login("user", "password").await.unwrap();
         let mut client = Client {
