@@ -29,7 +29,6 @@ async fn prepared(parent: &std::path::Path, count: u32) -> batch::Batch {
         username: "test".into(),
         password: "test".into(),
         scan_dir: parent.into(),
-        quarantine_dir: parent.into(),
         ..Default::default()
     })
     .unwrap();
@@ -456,7 +455,6 @@ async fn installed_avast_mime_batch_preserves_attribution_or_rejects_resident_in
         username: "test".into(),
         password: "test".into(),
         scan_dir: parent.clone(),
-        quarantine_dir: parent.clone(),
         ..Default::default()
     })
     .unwrap();

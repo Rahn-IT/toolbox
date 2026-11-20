@@ -7,7 +7,6 @@ fn settings(root: &Path) -> config::Settings {
         username: "user".into(),
         password: "password".into(),
         scan_dir: root.into(),
-        quarantine_dir: root.into(),
         parallel: "1".into(),
         ..Default::default()
     })
@@ -208,6 +207,7 @@ async fn scenario(hold_scanner: bool, close_receiver: bool, disconnect: bool, fu
         (counts.total, counts.processed, counts.cancelled),
         (2, 1, 1)
     );
+    std::fs::remove_dir(root.join("quarantine")).unwrap();
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     std::fs::remove_dir(root).unwrap();
 }
@@ -329,6 +329,7 @@ async fn full_gui_channel_retains_download_diagnostic_but_closes_connection_on_c
         (counts.processed, counts.incomplete, counts.cancelled),
         (1, 1, 1)
     );
+    std::fs::remove_dir(root.join("quarantine")).unwrap();
     assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
     std::fs::remove_dir(root).unwrap();
 }

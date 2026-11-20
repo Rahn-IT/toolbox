@@ -556,7 +556,6 @@ mod tests {
             username: "user".into(),
             password: "unused".into(),
             scan_dir: "unused".into(),
-            quarantine_dir: "unused".into(),
             scanner: crate::mailbox_scanner::core::scanner::Settings::Custom(
                 crate::mailbox_scanner::core::scanner::custom::Settings {
                     executable: std::env::current_exe().unwrap(),
@@ -825,7 +824,6 @@ fn main() {
             username: "user".into(),
             password: "unused".into(),
             scan_dir: parent.clone(),
-            quarantine_dir: parent.clone(),
             scanner: crate::mailbox_scanner::core::scanner::Settings::Custom(
                 crate::mailbox_scanner::core::scanner::custom::Settings {
                     executable,

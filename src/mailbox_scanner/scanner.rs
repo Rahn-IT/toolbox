@@ -383,7 +383,6 @@ mod tests {
             username: "user".into(),
             password: "password".into(),
             scan_dir: "scan".into(),
-            quarantine_dir: "quarantine".into(),
             scanner: scanner::Settings::Custom(scanner::custom::Settings {
                 executable: std::env::current_exe().unwrap(),
                 arguments: vec!["{directory}".into()],
@@ -673,7 +672,6 @@ mod tests {
             username: "unused".into(),
             password: "unused".into(),
             scan_dir: work.clone(),
-            quarantine_dir: work.clone(),
             scanner: scanner::Settings::Defender,
             ..config::Draft::default()
         })

@@ -122,11 +122,12 @@ mod tests {
     }
 
     #[test]
-    fn headless_page_selection_uses_the_rendered_controls() {
+    fn headless_purge_all_uses_the_rendered_control() {
         let mut app = App::preview_scan();
         let mut ui =
             iced_test::Simulator::with_size(iced::Settings::default(), (1180.0, 800.0), app.view());
-        ui.click("Select page").unwrap();
+        assert!(ui.find("Select page").is_err());
+        ui.click("Download & purge all (3)").unwrap();
         let messages: Vec<_> = ui.into_messages().collect();
         assert!(!messages.is_empty());
         for message in messages {
@@ -134,7 +135,7 @@ mod tests {
         }
         let mut ui =
             iced_test::Simulator::with_size(iced::Settings::default(), (1180.0, 800.0), app.view());
-        assert!(ui.find("Download & purge selected (3)").is_ok());
+        assert!(ui.find("Preserving and purging… 2 queued").is_ok());
     }
 
     #[test]

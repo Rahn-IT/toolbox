@@ -230,7 +230,10 @@ where
                 self.pipeline.selected = true;
             }
             let result = async {
-                while let Some(index) = self.pipeline.candidate() {
+                while let Some(index) = self
+                    .pipeline
+                    .candidate(usize::from(self.settings.download_chunks()))
+                {
                     let command = self.pipeline.command(index);
                     let tag = self
                         .client
@@ -473,7 +476,6 @@ mod tests {
             username: "user".into(),
             password: "password".into(),
             scan_dir: "scan".into(),
-            quarantine_dir: "quarantine".into(),
             ..Default::default()
         })
         .unwrap()

@@ -295,7 +295,7 @@ mod tests {
         app.site = Site::MailboxScanner;
         let mut ui =
             iced_test::Simulator::with_size(iced::Settings::default(), (1400.0, 850.0), app.view());
-        ui.click("Select page").unwrap();
+        ui.click("Details").unwrap();
         let messages: Vec<_> = ui.into_messages().collect();
         let _ = app.update(Message::SwitchSite(Site::Base64));
         for message in messages {
@@ -305,7 +305,8 @@ mod tests {
         let _ = app.update(Message::SwitchSite(Site::MailboxScanner));
         let mut ui =
             iced_test::Simulator::with_size(iced::Settings::default(), (1400.0, 850.0), app.view());
-        assert!(ui.find("Download & purge selected (3)").is_ok());
+        assert!(ui.find("Download & purge all (3)").is_ok());
+        assert!(ui.find("Less").is_ok());
     }
 
     #[test]

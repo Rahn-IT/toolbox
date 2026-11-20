@@ -52,7 +52,6 @@ fn main() {
             username: "user".into(),
             password: "password".into(),
             scan_dir: scan_dir.clone(),
-            quarantine_dir: scan_dir.clone(),
             batch_mib: "1".into(),
             parallel: "1".into(),
             scanner: crate::mailbox_scanner::core::scanner::Settings::Custom(
@@ -172,6 +171,7 @@ fn main() {
             if full { 2 } else { 1 }
         );
         server.await.unwrap();
+        std::fs::remove_dir(scan_dir.join("quarantine")).unwrap();
         assert_eq!(std::fs::read_dir(&scan_dir).unwrap().count(), 0);
         std::fs::remove_dir(scan_dir).unwrap();
     }

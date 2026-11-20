@@ -37,12 +37,12 @@ pub struct Draft {
     pub password: String,
     /// Parent directory for owned temporary scan files.
     pub scan_dir: PathBuf,
-    /// Parent directory for deliberately preserved EML output.
-    pub quarantine_dir: PathBuf,
     /// Scanner-specific settings for this run.
     pub scanner: scanner::Settings,
     /// Editable number of concurrent scanner jobs.
     pub parallel: String,
+    /// Editable number of outstanding IMAP body chunks.
+    pub download_chunks: String,
     /// Editable raw-message target in MiB.
     pub batch_mib: String,
     /// Editable directory scan timeout in minutes.
@@ -62,6 +62,7 @@ pub struct Settings {
     quarantine_dir: PathBuf,
     scanner: scanner::Settings,
     parallel: NonZeroU8,
+    download_chunks: NonZeroU8,
     batch_bytes: u64,
     batch_timeout: std::time::Duration,
     tls: Tls,
@@ -83,11 +84,14 @@ pub enum Error {
     #[error("Enter a username and password without login control characters")]
     Credentials,
     /// A required directory path is empty.
-    #[error("Select both scan and quarantine folders")]
+    #[error("Select a scan folder")]
     Folders,
     /// Concurrency is outside the supported range.
     #[error("Parallel scans must be between 1 and 16")]
     Parallel,
+    /// IMAP chunk concurrency is outside the supported range.
+    #[error("Parallel download chunks must be between 1 and 32")]
+    DownloadChunks,
     /// Raw-message batch target is outside the supported range.
     #[error("Batch size must be between 1 and 5120 MiB")]
     BatchSize,
@@ -104,9 +108,9 @@ impl Default for Draft {
             username: String::new(),
             password: String::new(),
             scan_dir: PathBuf::new(),
-            quarantine_dir: PathBuf::new(),
             scanner: scanner::Settings::default(),
             parallel: "1".into(),
+            download_chunks: "4".into(),
             batch_mib: "1024".into(),
             timeout_minutes: "30".into(),
             tls: Tls::Implicit,
@@ -123,9 +127,9 @@ impl fmt::Debug for Draft {
             .field("username", &self.username)
             .field("password", &"[redacted]")
             .field("scan_dir", &self.scan_dir)
-            .field("quarantine_dir", &self.quarantine_dir)
             .field("scanner", &self.scanner)
             .field("parallel", &self.parallel)
+            .field("download_chunks", &self.download_chunks)
             .field("tls", &self.tls)
             .finish()
     }
@@ -143,6 +147,7 @@ impl fmt::Debug for Settings {
             .field("quarantine_dir", &self.quarantine_dir)
             .field("scanner", &self.scanner)
             .field("parallel", &self.parallel)
+            .field("download_chunks", &self.download_chunks)
             .field("tls", &self.tls)
             .finish()
     }
@@ -168,7 +173,7 @@ impl TryFrom<Draft> for Settings {
         {
             return Err(Error::Credentials);
         }
-        if draft.scan_dir.as_os_str().is_empty() || draft.quarantine_dir.as_os_str().is_empty() {
+        if draft.scan_dir.as_os_str().is_empty() {
             return Err(Error::Folders);
         }
         let parallel = draft
@@ -178,6 +183,14 @@ impl TryFrom<Draft> for Settings {
             .map_err(|_| Error::Parallel)?;
         if parallel.get() > 16 {
             return Err(Error::Parallel);
+        }
+        let download_chunks = draft
+            .download_chunks
+            .trim()
+            .parse::<NonZeroU8>()
+            .map_err(|_| Error::DownloadChunks)?;
+        if download_chunks.get() > 32 {
+            return Err(Error::DownloadChunks);
         }
         let batch_mib = draft
             .batch_mib
@@ -205,10 +218,11 @@ impl TryFrom<Draft> for Settings {
             port,
             username: username.into(),
             password: draft.password,
+            quarantine_dir: draft.scan_dir.join("quarantine"),
             scan_dir: draft.scan_dir,
-            quarantine_dir: draft.quarantine_dir,
             scanner: draft.scanner,
             parallel,
+            download_chunks,
             batch_bytes,
             batch_timeout,
             tls: draft.tls,
@@ -262,6 +276,11 @@ impl Settings {
         self.parallel.get()
     }
 
+    /// Maximum outstanding body chunks on the single IMAP connection.
+    pub fn download_chunks(&self) -> u8 {
+        self.download_chunks.get()
+    }
+
     /// Raw original-message bytes that close a batch after the crossing message.
     pub fn batch_bytes(&self) -> u64 {
         self.batch_bytes
@@ -288,7 +307,6 @@ mod tests {
             username: " user@example.org ".into(),
             password: " secret ".into(),
             scan_dir: "scan".into(),
-            quarantine_dir: "quarantine".into(),
             ..Draft::default()
         }
     }
@@ -346,6 +364,29 @@ mod tests {
             let mut input = draft();
             input.parallel = value.into();
             assert!(Settings::try_from(input).is_ok());
+        }
+    }
+
+    #[test]
+    fn download_chunks_are_bounded_and_quarantine_is_inside_scan_folder() {
+        let settings = Settings::try_from(draft()).unwrap();
+        assert_eq!(settings.download_chunks(), 4);
+        assert_eq!(
+            settings.quarantine_dir(),
+            settings.scan_dir().join("quarantine")
+        );
+        for value in ["0", "33", "-1", "256", "many"] {
+            let mut input = draft();
+            input.download_chunks = value.into();
+            assert!(matches!(
+                Settings::try_from(input),
+                Err(Error::DownloadChunks)
+            ));
+        }
+        for value in [1, 2, 8, 32] {
+            let mut input = draft();
+            input.download_chunks = value.to_string();
+            assert_eq!(Settings::try_from(input).unwrap().download_chunks(), value);
         }
     }
 

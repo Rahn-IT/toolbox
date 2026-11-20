@@ -28,8 +28,22 @@ async fn reply(peer: &mut BufReader<tokio::io::DuplexStream>, uid: u32, tag: &st
 }
 
 #[tokio::test]
-async fn overlaps_four_requests_and_refills_before_other_completions() {
-    let settings = settings();
+async fn configured_depth_bounds_requests_and_refills_before_other_completions() {
+    for depth in [1, 2, 4, 8] {
+        overlaps_requests_and_refills(depth).await;
+    }
+}
+
+async fn overlaps_requests_and_refills(depth: u32) {
+    let settings = config::Settings::try_from(config::Draft {
+        host: "mail.example.com".into(),
+        username: "user".into(),
+        password: "password".into(),
+        scan_dir: "scan".into(),
+        download_chunks: depth.to_string(),
+        ..Default::default()
+    })
+    .unwrap();
     let (stream, peer) = tokio::io::duplex(4096);
     let server = tokio::spawn(async move {
         let mut peer = BufReader::new(peer);
@@ -42,8 +56,12 @@ async fn overlaps_four_requests_and_refills_before_other_completions() {
         peer.write_all(OPEN.1.replace("{tag}", &tag).as_bytes())
             .await
             .unwrap();
-        let tag = command(&mut peer, "UID FETCH 1,2,3,4,5 (UID RFC822.SIZE)").await;
-        for uid in 1..=5 {
+        let uids = (1..=depth + 1)
+            .map(|uid| uid.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let tag = command(&mut peer, &format!("UID FETCH {uids} (UID RFC822.SIZE)")).await;
+        for uid in 1..=depth + 1 {
             peer.write_all(format!("* {uid} FETCH (UID {uid} RFC822.SIZE 1)\r\n").as_bytes())
                 .await
                 .unwrap();
@@ -52,7 +70,7 @@ async fn overlaps_four_requests_and_refills_before_other_completions() {
             .await
             .unwrap();
         let mut tags = Vec::new();
-        for uid in 1..=4 {
+        for uid in 1..=depth {
             tags.push(
                 command(
                     &mut peer,
@@ -61,13 +79,23 @@ async fn overlaps_four_requests_and_refills_before_other_completions() {
                 .await,
             );
         }
-        reply(&mut peer, 3, &tags[2]).await;
-        // The fifth command must arrive while 1, 2 and 4 remain unacknowledged.
-        let fifth = command(&mut peer, "UID FETCH 5 (UID BODY.PEEK[]<0.1>)").await;
-        for index in [1, 0, 3] {
-            reply(&mut peer, index as u32 + 1, &tags[index]).await;
+        // Admission must stop at the configured depth until one response arrives.
+        let mut extra = String::new();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), peer.read_line(&mut extra))
+                .await
+                .is_err()
+        );
+        reply(&mut peer, depth, tags.last().unwrap()).await;
+        let next = command(
+            &mut peer,
+            &format!("UID FETCH {} (UID BODY.PEEK[]<0.1>)", depth + 1),
+        )
+        .await;
+        for uid in 1..depth {
+            reply(&mut peer, uid, &tags[uid as usize - 1]).await;
         }
-        reply(&mut peer, 5, &fifth).await;
+        reply(&mut peer, depth + 1, &next).await;
     });
     let client =
         mailbox::Client::scripted(stream, message::Account::from_settings(&settings), false)
@@ -79,10 +107,10 @@ async fn overlaps_four_requests_and_refills_before_other_completions() {
         client: None,
         pipeline: pipeline::Pipeline::default(),
     };
-    worker.begin(snapshot(5));
+    worker.begin(snapshot(depth + 1));
     let mut connector = || std::future::ready(Ok(client.take().expect("one connection")));
     let mut seen = Vec::new();
-    for _ in 0..5 {
+    for _ in 0..depth + 1 {
         let (identity, result) =
             tokio::time::timeout(Duration::from_secs(3), worker.next_with(&mut connector))
                 .await
@@ -91,7 +119,11 @@ async fn overlaps_four_requests_and_refills_before_other_completions() {
         assert_eq!(result.unwrap(), b"x");
         seen.push(identity.uid());
     }
-    assert_eq!(seen, [3, 2, 1, 4, 5]);
+    let expected: Vec<_> = std::iter::once(depth)
+        .chain(1..depth)
+        .chain(std::iter::once(depth + 1))
+        .collect();
+    assert_eq!(seen, expected);
     assert_eq!(worker.remaining(), 0);
     server.await.unwrap();
 }
@@ -311,13 +343,13 @@ fn full_body_reservations_prevent_four_sixty_mib_admissions() {
     for index in 0..3 {
         pipeline.sent(index, format!("A{index}"));
     }
-    assert!(pipeline.candidate().is_none());
+    assert!(pipeline.candidate(4).is_none());
     assert!(pipeline.entries[3].bytes.is_none());
     pipeline.entries[0].retired = true;
     pipeline.held = 60 * 1024 * 1024;
-    assert!(pipeline.candidate().is_none());
+    assert!(pipeline.candidate(4).is_none());
     pipeline.resume();
-    assert_eq!(pipeline.candidate(), Some(3));
+    assert_eq!(pipeline.candidate(4), Some(3));
 }
 
 #[tokio::test]

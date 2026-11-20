@@ -813,7 +813,6 @@ mod tests {
             username: "user".into(),
             password: "password".into(),
             scan_dir: std::env::temp_dir(),
-            quarantine_dir: std::env::temp_dir(),
             ..Default::default()
         })
         .unwrap();
@@ -936,7 +935,6 @@ mod tests {
             username: "user".into(),
             password: "password".into(),
             scan_dir: std::env::temp_dir(),
-            quarantine_dir: std::env::temp_dir(),
             ..config::Draft::default()
         })
         .unwrap();

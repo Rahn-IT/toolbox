@@ -6,7 +6,6 @@ use std::collections::VecDeque;
 use std::time::Duration;
 use tokio::time::Instant;
 
-pub(super) const DEPTH: usize = 4;
 const CHUNK: usize = 1024 * 1024;
 
 pub(super) struct Entry {
@@ -84,7 +83,7 @@ impl Pipeline {
         if exhausted { Err(()) } else { Ok(delay) }
     }
 
-    pub fn candidate(&mut self) -> Option<usize> {
+    pub fn candidate(&mut self, depth: usize) -> Option<usize> {
         let mut reserved = self.held;
         let mut active = usize::from(self.held > 0);
         for entry in &self.entries {
@@ -98,7 +97,7 @@ impl Pipeline {
                 continue;
             }
             if entry.bytes.is_none() {
-                if active == DEPTH || reserved + entry.size > mailbox::MAX_MESSAGE {
+                if active >= depth || reserved + entry.size > mailbox::MAX_MESSAGE {
                     return None;
                 }
                 entry.bytes = Some(Vec::with_capacity(entry.size));

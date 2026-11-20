@@ -20,8 +20,8 @@ pub struct State {
     username: String,
     password: String,
     scan_dir: String,
-    quarantine_dir: String,
     parallel: String,
+    download_chunks: String,
     batch_mib: String,
     timeout_minutes: String,
     scanner: Draft,
@@ -37,7 +37,6 @@ pub enum Message {
     Username(String),
     Password(String),
     ScanDir(String),
-    QuarantineDir(String),
     EntireFiles(bool),
     Archives(bool),
     Heuristics(u8),
@@ -50,19 +49,14 @@ pub enum Message {
     PickExecutable,
     ExecutablePicked(u64, Option<PathBuf>),
     Parallel(String),
+    DownloadChunks(String),
     BatchMib(String),
     TimeoutMinutes(String),
     Backend(scanner::Backend),
     Tls(config::Tls),
     Start,
-    Browse(Browse),
-    Picked(Browse, Option<PathBuf>),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum Browse {
-    Scan,
-    Quarantine,
+    Browse,
+    Picked(Option<PathBuf>),
 }
 
 impl std::fmt::Debug for Message {
@@ -156,8 +150,8 @@ impl Default for State {
             username: String::new(),
             password: String::new(),
             scan_dir: String::new(),
-            quarantine_dir: String::new(),
             parallel: "1".into(),
+            download_chunks: "4".into(),
             batch_mib: "1024".into(),
             timeout_minutes: "30".into(),
             scanner: Draft::default(),
@@ -171,26 +165,21 @@ impl Default for State {
 impl State {
     pub fn update(&mut self, message: Message) -> Action<Instruction, Message> {
         match message {
-            Message::Browse(kind) => {
+            Message::Browse => {
                 return Action {
                     instruction: None,
-                    task: iced::Task::perform(pick(kind), move |path| Message::Picked(kind, path)),
+                    task: iced::Task::perform(pick(), Message::Picked),
                 };
             }
-            Message::Picked(kind, Some(path)) => {
-                let path = path.to_string_lossy().into_owned();
-                match kind {
-                    Browse::Scan => self.scan_dir = path,
-                    Browse::Quarantine => self.quarantine_dir = path,
-                }
+            Message::Picked(Some(path)) => {
+                self.scan_dir = path.to_string_lossy().into_owned();
             }
-            Message::Picked(_, None) => {}
+            Message::Picked(None) => {}
             Message::Host(value) => self.host = value,
             Message::Port(value) => self.port = value,
             Message::Username(value) => self.username = value,
             Message::Password(value) => self.password = value,
             Message::ScanDir(value) => self.scan_dir = value,
-            Message::QuarantineDir(value) => self.quarantine_dir = value,
             Message::EntireFiles(value) => {
                 if let Draft::Avast(settings) = &mut self.scanner {
                     settings.entire_files = value;
@@ -207,6 +196,7 @@ impl State {
                 }
             }
             Message::Parallel(value) => self.parallel = value,
+            Message::DownloadChunks(value) => self.download_chunks = value,
             Message::BatchMib(value) => self.batch_mib = value,
             Message::TimeoutMinutes(value) => self.timeout_minutes = value,
             Message::Executable(value) => {
@@ -315,8 +305,8 @@ impl State {
                     username: self.username.clone(),
                     password: self.password.clone(),
                     scan_dir: PathBuf::from(&self.scan_dir),
-                    quarantine_dir: PathBuf::from(&self.quarantine_dir),
                     parallel: self.parallel.clone(),
+                    download_chunks: self.download_chunks.clone(),
                     batch_mib: if matches!(self.scanner, Draft::Defender) {
                         "1024".into()
                     } else {
@@ -343,19 +333,9 @@ impl State {
 
     pub fn view(&self) -> Element<'_, Message> {
         let folders = column![
-            text("1  Working folders").size(21),
-            path_field(
-                "Scan folder",
-                &self.scan_dir,
-                Message::ScanDir,
-                Browse::Scan
-            ),
-            path_field(
-                "Quarantine folder",
-                &self.quarantine_dir,
-                Message::QuarantineDir,
-                Browse::Quarantine
-            ),
+            text("1  Working folder").size(21),
+            path_field("Scan folder", &self.scan_dir, Message::ScanDir),
+            text("A quarantine subfolder is created automatically inside the scan folder."),
         ]
         .spacing(12);
         let account = column![
@@ -379,6 +359,12 @@ impl State {
                     .padding(10)
             ]
             .spacing(5),
+            field(
+                "Parallel download chunks (1–32)",
+                &self.download_chunks,
+                Message::DownloadChunks
+            ),
+            text("One connection, 1 MiB per chunk. The memory limit may reduce concurrency."),
         ]
         .spacing(12);
         let mut scanner = column![
@@ -510,13 +496,10 @@ fn path_field<'a>(
     label: &'a str,
     value: &'a str,
     message: fn(String) -> Message,
-    kind: Browse,
 ) -> iced::widget::Column<'a, Message> {
     let controls = row![
         text_input("", value).on_input(message).padding(10),
-        button("Browse…")
-            .on_press(Message::Browse(kind))
-            .padding(10)
+        button("Browse…").on_press(Message::Browse).padding(10)
     ]
     .spacing(8);
     column![text(label), controls]
@@ -524,18 +507,15 @@ fn path_field<'a>(
         .width(Length::Fill)
 }
 
-async fn pick(kind: Browse) -> Option<PathBuf> {
+async fn pick() -> Option<PathBuf> {
     #[cfg(windows)]
     {
         let dialog = rfd::AsyncFileDialog::new();
-        let selected = match kind {
-            Browse::Scan | Browse::Quarantine => dialog.pick_folder().await,
-        };
+        let selected = dialog.pick_folder().await;
         selected.map(|file| file.path().to_path_buf())
     }
     #[cfg(not(windows))]
     {
-        let _ = kind;
         None
     }
 }
@@ -591,7 +571,6 @@ mod tests {
             username: "user".into(),
             password: "secret".into(),
             scan_dir: "scan".into(),
-            quarantine_dir: "quarantine".into(),
             ..State::default()
         };
         let _ = state.update(Message::Backend(scanner::Backend::Custom));

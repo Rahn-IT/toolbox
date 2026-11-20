@@ -525,7 +525,6 @@ mod tests {
             username: "test".into(),
             password: "test".into(),
             scan_dir: "scan".into(),
-            quarantine_dir: "quarantine".into(),
             ..Default::default()
         })
         .unwrap();

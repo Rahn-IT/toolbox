@@ -27,3 +27,15 @@ Scripted native Rust peers cover overlap/refill, connection replacement, retry e
 No live mailbox, live antivirus, cross-platform build or performance measurement was run. Timing evidence uses scaled deadlines and injected pause values, not a real multi-minute transfer. Tests do not enumerate every cancellation/state combination. Six ignored tests remain opt-in. A full-suite fixture initially failed on a Windows sharing violation during cleanup; bounded test-only cleanup retry fixed it, and the complete suite then passed.
 
 Changes remain uncommitted on the existing branch. No implementation work remains for this MAP. Future work should start from a new user request; do not automatically commit or repair unrelated lint/format findings.
+
+## Follow-up: configurable downloads and automatic quarantine
+
+User requested configurable outstanding chunks and confirmed quarantine should be a subfolder of the selected scan folder. Setup now accepts 1–32 parallel download chunks, default 4; worker uses the validated setting for every admission. Chunk size and aggregate memory reservation remain unchanged. Removed the separate quarantine field/picker; Settings derives scan_dir/quarantine and existing workflow preparation creates it. Scan-session cleanup stays separate.
+
+Validation: cargo check passed; full suite 175 passed / 6 ignored; scripted overlap/refill covers depths 1, 2, 4, 8. Static-CRT release rebuilt successfully at target/release/toolbox.exe. git diff --check passed. fmt retains only the known discord.rs difference. Clippy exits successfully with 19 warnings: 18 existing plus large_enum_variant in mailbox_scanner/mod.rs, newly exposed because removing the obsolete folder-picker kind reduces the Setup message size. No unrelated message boxing/refactor was introduced. No live mailbox or GUI interaction test. Follow-up changes remain uncommitted.
+
+## Follow-up: purge all detected results
+
+Removed result selection state, checkboxes, select/clear-page controls and per-row purge buttons. One Download & purge all button queues every detected row across all pages except confirmed-purged entries. Download-only, local checks, details, paging and Stop after current remain. The existing serial save/verify-before-mutation workflow is unchanged; the bulk action is disabled during scanning, active actions and closing.
+
+Validation: cargo check passed; full suite 176 passed / 6 ignored, including cross-page queuing, skip/double-click/closing guards and rendered UI tests. Clippy remains at 19 warnings; fmt retains only the unrelated discord.rs difference. Static-CRT release build and diff check passed. No real mailbox actions performed. Changes remain uncommitted.

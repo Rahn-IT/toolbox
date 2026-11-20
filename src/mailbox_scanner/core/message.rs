@@ -166,7 +166,6 @@ mod tests {
             username: "user".into(),
             password: "private password".into(),
             scan_dir: "scan".into(),
-            quarantine_dir: "quarantine".into(),
             ..config::Draft::default()
         })
         .unwrap();

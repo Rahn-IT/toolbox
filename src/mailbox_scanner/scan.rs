@@ -6,9 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use futures_util::stream;
-use iced::widget::{
-    button, checkbox, column, container, progress_bar, row, scrollable, space, text,
-};
+use iced::widget::{button, column, container, progress_bar, row, scrollable, space, text};
 use iced::{Element, Length, Task};
 use tokio::sync::{mpsc, watch};
 
@@ -53,7 +51,6 @@ struct Finding {
     sender: String,
     report: detection::Report,
     terminal: bool,
-    selected: bool,
     expanded: bool,
     upstream: Upstream,
     saved: Option<detection::Saved>,
@@ -101,13 +98,11 @@ pub enum Message {
         error: Option<String>,
     },
     StreamClosed(u64),
-    Select(message::Identity, bool),
-    SelectPage(bool),
     Page(usize),
     Details(message::Identity),
     ToggleDiagnostics,
     Start(message::Identity, Kind),
-    PurgeSelected,
+    PurgeAll,
     ActionDone {
         run: u64,
         identity: message::Identity,
@@ -195,17 +190,6 @@ impl State {
                 self.runner_error = error;
             }
             Message::StreamClosed(run) if run == self.run => self.stream_closed = true,
-            Message::Select(identity, selected) if self.active.is_none() => {
-                if let Some(finding) = self.find(&identity) {
-                    finding.selected = selected && finding.upstream != Upstream::Purged;
-                }
-            }
-            Message::SelectPage(selected) if self.active.is_none() => {
-                let start = self.page * PAGE_SIZE;
-                for finding in self.rows.iter_mut().skip(start).take(PAGE_SIZE) {
-                    finding.selected = selected && finding.upstream != Upstream::Purged;
-                }
-            }
             Message::Page(page) => self.page = page.min(self.pages() - 1),
             Message::Details(identity) => {
                 if let Some(finding) = self.find(&identity) {
@@ -216,11 +200,11 @@ impl State {
             Message::Start(identity, kind) if !self.busy() && !self.closing => {
                 return self.start(identity, kind);
             }
-            Message::PurgeSelected if !self.busy() && !self.closing => {
+            Message::PurgeAll if !self.busy() && !self.closing => {
                 self.queue = self
                     .rows
                     .iter()
-                    .filter(|finding| finding.selected && finding.upstream != Upstream::Purged)
+                    .filter(|finding| finding.upstream != Upstream::Purged)
                     .map(|finding| finding.identity.clone())
                     .collect();
                 return self.next();
@@ -269,10 +253,8 @@ impl State {
             Message::Worker { .. }
             | Message::RunnerDone { .. }
             | Message::StreamClosed(_)
-            | Message::Select(_, _)
-            | Message::SelectPage(_)
             | Message::Start(_, _)
-            | Message::PurgeSelected
+            | Message::PurgeAll
             | Message::ActionDone { .. }
             | Message::Back
             | Message::ConfirmClose => {}
@@ -310,7 +292,6 @@ impl State {
             username: "Synthetic preview".into(),
             password: "unused".into(),
             scan_dir: "preview-scan".into(),
-            quarantine_dir: "preview-quarantine".into(),
             ..config::Draft::default()
         })
         .expect("synthetic preview settings are valid");
@@ -349,7 +330,6 @@ impl State {
                     )),
                 );
                 if let Some(finding) = state.find(&identity) {
-                    finding.selected = true;
                     finding.detail =
                         "SYNTHETIC PREVIEW: no message downloaded and no local file written."
                             .into();
@@ -427,7 +407,6 @@ impl State {
                             sender,
                             report,
                             terminal,
-                            selected: false,
                             expanded: false,
                             upstream: Upstream::NotPurged,
                             saved: None,
@@ -620,9 +599,6 @@ impl State {
                 finding.availability = None;
                 finding.upstream = upstream;
                 finding.detail = detail;
-                if upstream == Upstream::Purged {
-                    finding.selected = false;
-                }
             }
             Response::Failed { detail, uncertain } => {
                 finding.detail = detail;
@@ -674,10 +650,10 @@ impl State {
     pub fn view(&self) -> Element<'_, Message> {
         let scanning = !self.runner_done || !self.stream_closed;
         let actions_enabled = !self.busy() && !self.closing;
-        let selected = self
+        let remaining = self
             .rows
             .iter()
-            .filter(|finding| finding.selected && finding.upstream != Upstream::Purged)
+            .filter(|finding| finding.upstream != Upstream::Purged)
             .count();
         let title = row![
             column![
@@ -798,7 +774,6 @@ impl State {
         }
         let mut table = column![
             row![
-                text("").width(30),
                 text("Subject").width(240),
                 text("Sender").width(165),
                 text("Folder").width(125),
@@ -808,7 +783,7 @@ impl State {
             .spacing(10)
         ]
         .spacing(10)
-        .width(Length::Fixed(1090.0));
+        .width(Length::Fixed(1050.0));
         if self.rows.is_empty() {
             table = table.push(
                 container(text(if scanning {
@@ -842,16 +817,11 @@ impl State {
             button("Next").on_press_maybe(
                 (self.page + 1 < self.pages()).then_some(Message::Page(self.page + 1))
             ),
-            space().width(Length::Fill),
-            button("Select page")
-                .on_press_maybe(self.active.is_none().then_some(Message::SelectPage(true))),
-            button("Clear page")
-                .on_press_maybe(self.active.is_none().then_some(Message::SelectPage(false))),
         ]
         .spacing(10)
         .align_y(iced::Alignment::Center);
         let mut batch = row![
-            text(format!("{selected} selected")).size(14),
+            text(format!("{remaining} detections remaining across all pages")).size(14),
             space().width(Length::Fill)
         ];
         if let Some(active) = &self.active {
@@ -866,10 +836,10 @@ impl State {
         }
         batch = batch
             .push(
-                button(text(format!("Download & purge selected ({selected})")))
+                button(text(format!("Download & purge all ({remaining})")))
                     .style(button::danger)
                     .on_press_maybe(
-                        (actions_enabled && selected > 0).then_some(Message::PurgeSelected),
+                        (actions_enabled && remaining > 0).then_some(Message::PurgeAll),
                     ),
             )
             .spacing(12)
@@ -941,11 +911,6 @@ impl State {
             .as_ref()
             .is_some_and(|active| &active.identity == identity);
         let actionable = enabled && finding.upstream != Upstream::Purged;
-        let mut selected = checkbox(finding.selected);
-        if self.active.is_none() && finding.upstream != Upstream::Purged {
-            let identity = identity.clone();
-            selected = selected.on_toggle(move |value| Message::Select(identity.clone(), value));
-        }
         let threat = finding
             .report
             .evidence()
@@ -983,10 +948,6 @@ impl State {
                     actionable.then(|| Message::Start(identity.clone(), Kind::Download))
                 )
                 .width(190),
-            button("Download & purge")
-                .style(button::danger)
-                .on_press_maybe(actionable.then(|| Message::Start(identity.clone(), Kind::Purge)))
-                .width(190),
             row![
                 button("Check file").on_press_maybe(
                     (enabled && finding.saved.is_some())
@@ -1001,7 +962,6 @@ impl State {
         .spacing(6)
         .width(190);
         let top = row![
-            selected.width(30),
             text(&finding.subject).size(14).width(240).height(42),
             text(&finding.sender).size(13).width(165).height(42),
             text(identity.folder().display())
@@ -1103,7 +1063,6 @@ mod tests {
             username: "user".into(),
             password: "private".into(),
             scan_dir: "unused-scan-path".into(),
-            quarantine_dir: "unused-quarantine-path".into(),
             ..config::Draft::default()
         })
         .unwrap();
@@ -1216,24 +1175,29 @@ mod tests {
     }
 
     #[test]
-    fn page_selection_preserves_other_pages() {
+    fn purge_all_queues_every_page_and_skips_already_purged_messages() {
         let mut state = state();
         for uid in 1..=105 {
             detected(&mut state, uid);
         }
-        let _ = state.update(Message::SelectPage(true));
-        assert_eq!(
-            state.rows.iter().filter(|finding| finding.selected).count(),
-            100
-        );
+        state.rows[0].upstream = Upstream::Purged;
+        state.rows[102].upstream = Upstream::Purged;
         let _ = state.update(Message::Page(1));
-        let _ = state.update(Message::SelectPage(true));
-        let _ = state.update(Message::Page(0));
-        let _ = state.update(Message::SelectPage(false));
+        drop(state.update(Message::PurgeAll));
+        let active = state.active.as_ref().unwrap();
+        assert_eq!(active.kind, Kind::Purge);
+        assert_eq!(active.identity.uid(), 2);
         assert_eq!(
-            state.rows.iter().filter(|finding| finding.selected).count(),
-            5
+            state
+                .queue
+                .iter()
+                .map(message::Identity::uid)
+                .collect::<Vec<_>>(),
+            (3..=105).filter(|uid| *uid != 103).collect::<Vec<_>>()
         );
+        // Repeated clicks cannot replace or duplicate an active queue.
+        drop(state.update(Message::PurgeAll));
+        assert_eq!(state.queue.len(), 102);
     }
 
     #[test]
@@ -1294,6 +1258,19 @@ mod tests {
         let action = state.update(Message::Start(identity, Kind::Purge));
         assert!(action.instruction.is_none());
         assert!(state.active.is_none());
+        drop(state.update(Message::PurgeAll));
+        assert!(state.active.is_none());
+        assert!(state.queue.is_empty());
+    }
+
+    #[test]
+    fn purge_all_is_ignored_while_closing() {
+        let mut state = state();
+        detected(&mut state, 1);
+        state.closing = true;
+        drop(state.update(Message::PurgeAll));
+        assert!(state.active.is_none());
+        assert!(state.queue.is_empty());
     }
 
     #[test]
@@ -1338,7 +1315,6 @@ mod tests {
         assert_eq!(state.rows.len(), 1);
         assert!(!state.rows[0].terminal);
         assert!(state.busy());
-        state.rows[0].selected = true;
         state.rows[0].expanded = true;
         state.receive(event::Event::MessageUpdated {
             identity: identity.clone(),
@@ -1361,7 +1337,7 @@ mod tests {
         assert_eq!(state.rows[0].report.evidence().len(), 1);
         assert!(state.rows[0].terminal);
         assert!(!state.rows[0].report.complete());
-        assert!(state.rows[0].selected && state.rows[0].expanded);
+        assert!(state.rows[0].expanded);
         assert!(state.busy());
         state.receive(event::Event::MessageUpdated {
             identity,
