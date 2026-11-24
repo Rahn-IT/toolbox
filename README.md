@@ -48,7 +48,7 @@ You can Scan a path and then export the found paths into a CSV file.
 
 ### Usage
 
-- [Download the latest version](https://github.com/Rahn-IT/path-length-checker/releases/latest/download/path-length-checker.exe)
+- [Download the latest version](https://github.com/Rahn-IT/toolbox/releases/latest/download/toolbox-v0.4.6-windows-x86_64.exe)
 - Open the program and select the folder you'd like to scan
 - Optionally change the limit from the default of 240 (windows causes problems once over 260)
 - Click "Start Scan"
