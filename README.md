@@ -5,12 +5,12 @@ This is a small collection of useful tools as a simple to download and run execu
 ## ⚠️WARNING⚠️
 
 > [!WARNING]
-> **This repository is partially vibe coded.**
+> **This repository is heavily vibe coded.**
 >
-> While I built most of the code myself, I used an agent to build the more boring parts. It does still struggle a bit with iced, so I do still need to do a few refactors here and there.
+> These are mostly internal tools. They are made public for your convinience and inspiration.
 >
-> It's a very simple app and we use it ourselves, but I still feel like it should be openly disclosed,
-> as it will always influence code quality.
+> These tools were mostly built because we need them. They are not as polish as a public app probably should be.
+> Nevertheless, they might be useful to you, so I'm keeping this public. 
 >
 > Feel free to check out the code if you're unsure
 
