@@ -17,11 +17,4 @@ impl<M: Send + 'static> Action<M> {
             Self::Close => Action::Close,
         }
     }
-
-    pub(crate) fn into_task(self) -> Task<M> {
-        match self {
-            Self::Task(task) => task,
-            Self::None | Self::Focus | Self::Close => Task::none(),
-        }
-    }
 }

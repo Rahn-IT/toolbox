@@ -13,7 +13,7 @@ mod action;
 mod scan;
 mod setup;
 
-use iced::{Element, Subscription, Task};
+use iced::{Element, Task};
 
 use crate::action::Action;
 
@@ -166,16 +166,6 @@ impl App {
             Some(state) => state.view().map(Message::Scan),
             None => self.setup.view().map(Message::Setup),
         }
-    }
-
-    /// Window close participates in cancellation and cleanup.
-    pub fn subscription(&self) -> Subscription<Message> {
-        iced::event::listen_with(|event, _, _| match event {
-            iced::Event::Window(iced::window::Event::CloseRequested) => {
-                Some(Message::CloseRequested)
-            }
-            _ => None,
-        })
     }
 }
 

@@ -80,9 +80,4 @@ impl Encoder {
         .spacing(10)
         .into()
     }
-
-    pub fn set_encoding(&mut self, encode: fn(&str) -> String, decode: fn(&str) -> String) {
-        self.encode = encode;
-        self.decode = decode;
-    }
 }
