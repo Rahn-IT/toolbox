@@ -1,7 +1,6 @@
-use iced::{
-    Task,
-    widget::{button, column, rule},
-};
+use iced::widget::{button, column, rule};
+
+use crate::action::Action;
 
 mod connect;
 mod monitor;
@@ -27,29 +26,29 @@ impl Nut {
         }
     }
 
-    pub fn update(&mut self, message: Message) -> Task<Message> {
+    pub fn update(&mut self, message: Message) -> Action<Message> {
         match message {
             Message::Connect(message) => match self.connect.update(message) {
-                connect::Action::Run(task) => task.map(Message::Connect),
+                connect::Action::Run(task) => Action::Task(task.map(Message::Connect)),
                 connect::Action::Client(nut_client) => {
                     let (monitor, task) = monitor::Monitor::new(nut_client);
                     self.monitor = Some(monitor);
-                    task.map(Message::Monitor)
+                    Action::Task(task.map(Message::Monitor))
                 }
-                connect::Action::None => Task::none(),
+                connect::Action::None => Action::None,
             },
             Message::Monitor(message) => {
                 if let Some(monitor) = &mut self.monitor {
                     match monitor.update(message) {
-                        monitor::Action::None => Task::none(),
+                        monitor::Action::None => Action::None,
                     }
                 } else {
-                    Task::none()
+                    Action::None
                 }
             }
             Message::Disconnect => {
                 self.monitor = None;
-                Task::none()
+                Action::None
             }
         }
     }

@@ -61,6 +61,7 @@ pub struct State {
     filter: String,
     phase: Phase,
     status: String,
+    closing: bool,
 }
 
 #[derive(Default, PartialEq)]
@@ -84,8 +85,32 @@ pub enum Message {
 }
 
 impl State {
+    pub fn is_closing(&self) -> bool {
+        self.closing
+    }
+
+    pub fn close(&mut self) -> crate::action::Action<Message> {
+        if self.phase == Phase::Running {
+            self.closing = true;
+            crate::action::Action::None
+        } else {
+            crate::action::Action::Close
+        }
+    }
+
     /// Handle selection, review, and execution without blocking the UI.
-    pub fn update(&mut self, message: Message) -> Task<Message> {
+    pub fn update(&mut self, message: Message) -> crate::action::Action<Message> {
+        let close = self.closing && matches!(&message, Message::Finished(_));
+        let task = self.update_task(message);
+        if close {
+            self.closing = false;
+            crate::action::Action::Close
+        } else {
+            crate::action::Action::Task(task)
+        }
+    }
+
+    fn update_task(&mut self, message: Message) -> Task<Message> {
         if self.phase == Phase::Running {
             if let Message::Finished(status) = message {
                 self.status = status;

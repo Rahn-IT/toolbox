@@ -5,6 +5,8 @@ use rfd::{AsyncFileDialog, FileHandle};
 use tokio::{fs, io::AsyncWriteExt, time::Instant};
 use tokio_util::sync::CancellationToken;
 
+use crate::action::Action;
+
 #[derive(Debug, Clone)]
 pub enum Message {
     SelectFolder,
@@ -33,6 +35,7 @@ pub struct PathLengthChecker {
     scan_limit: usize,
     errors: Vec<String>,
     exporting: bool,
+    closing: bool,
     export_message: Option<String>,
     export_success: bool,
 }
@@ -99,12 +102,39 @@ impl PathLengthChecker {
             scan_limit: 240,
             errors: Vec::new(),
             exporting: false,
+            closing: false,
             export_message: None,
             export_success: false,
         }
     }
 
-    pub fn update(&mut self, message: Message) -> Task<Message> {
+    pub fn is_closing(&self) -> bool {
+        self.closing
+    }
+
+    pub fn close(&mut self) -> Action<Message> {
+        self.cancel_scan();
+        if self.selecting || self.exporting {
+            self.closing = true;
+            Action::None
+        } else {
+            Action::Close
+        }
+    }
+
+    pub fn update(&mut self, message: Message) -> Action<Message> {
+        if self.closing {
+            match message {
+                Message::SelectedFolder(_) => self.selecting = false,
+                Message::CsvExportComplete(_) => self.exporting = false,
+                _ => return Action::None,
+            }
+            return self.close();
+        }
+        Action::Task(self.update_task(message))
+    }
+
+    fn update_task(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SelectFolder => {
                 self.selecting = true;

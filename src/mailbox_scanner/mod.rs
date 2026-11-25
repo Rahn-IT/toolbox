@@ -15,11 +15,14 @@ mod setup;
 
 use iced::{Element, Subscription, Task};
 
+use crate::action::Action;
+
 /// Application state and screen ownership.
 #[derive(Default)]
 pub struct App {
     setup: setup::State,
     scan: Option<Box<scan::State>>,
+    confirm_abort: bool,
 }
 
 /// Messages are routed to their owning screen.
@@ -28,11 +31,58 @@ pub enum Message {
     Setup(setup::Message),
     Scan(scan::Message),
     CloseRequested,
+    ConfirmAbort,
+    KeepScanning,
 }
 
 impl App {
     pub fn is_closing(&self) -> bool {
         self.scan.as_ref().is_some_and(|state| state.is_closing())
+    }
+
+    pub(crate) fn has_scan(&self) -> bool {
+        self.scan.is_some()
+    }
+
+    pub(crate) fn close_status(&self) -> Option<&'static str> {
+        if self.confirm_abort
+            || self
+                .scan
+                .as_ref()
+                .is_some_and(|state| state.is_reviewing_close())
+        {
+            Some("Review to close")
+        } else if self.is_closing() {
+            Some("Closing…")
+        } else {
+            None
+        }
+    }
+
+    pub fn close(&mut self) -> Action<Message> {
+        if self.is_closing() {
+            return if self
+                .scan
+                .as_ref()
+                .is_some_and(|state| state.is_reviewing_close())
+            {
+                Action::Focus
+            } else {
+                Action::None
+            };
+        }
+        if self.scan.as_ref().is_some_and(|state| state.busy()) {
+            self.confirm_abort = true;
+            Action::Focus
+        } else {
+            self.update(Message::CloseRequested)
+        }
+    }
+
+    pub(crate) fn clear_close_request(&mut self) {
+        if let Some(state) = &mut self.scan {
+            state.clear_close_request();
+        }
     }
 
     /// Development-only synthetic scan view for visual verification.
@@ -41,45 +91,77 @@ impl App {
         Self {
             setup: setup::State::default(),
             scan: Some(Box::new(scan::State::preview())),
+            confirm_abort: false,
         }
     }
     /// Apply an event and forward screen tasks.
-    pub fn update(&mut self, message: Message) -> Task<Message> {
+    pub fn update(&mut self, message: Message) -> Action<Message> {
         match message {
             Message::Setup(message) if self.scan.is_none() => {
                 let action = self.setup.update(message);
                 if let Some(setup::Instruction::Begin(settings)) = action.instruction {
                     let (state, task) = scan::State::new(settings);
                     self.scan = Some(Box::new(state));
-                    return Task::batch([action.task.map(Message::Setup), task.map(Message::Scan)]);
+                    return Action::Task(Task::batch([
+                        action.task.map(Message::Setup),
+                        task.map(Message::Scan),
+                    ]));
                 }
-                action.task.map(Message::Setup)
+                Action::Task(action.task.map(Message::Setup))
             }
             Message::Scan(message) => {
                 let Some(state) = &mut self.scan else {
-                    return Task::none();
+                    return Action::None;
                 };
+                let was_reviewing = state.is_reviewing_close();
                 let action = state.update(message);
                 match action.instruction {
                     Some(scan::Instruction::Back) => self.scan = None,
-                    Some(scan::Instruction::Close) => return iced::exit(),
+                    Some(scan::Instruction::Close) => return Action::Close,
+                    None if !was_reviewing && state.is_reviewing_close() => return Action::Focus,
                     None => {}
                 }
-                action.task.map(Message::Scan)
+                Action::Task(action.task.map(Message::Scan))
             }
-            Message::CloseRequested => {
+            Message::CloseRequested | Message::ConfirmAbort
+                if matches!(message, Message::CloseRequested) || self.confirm_abort =>
+            {
+                self.confirm_abort = false;
                 if self.scan.is_some() {
                     self.update(Message::Scan(scan::Message::CloseRequested))
                 } else {
-                    iced::exit()
+                    Action::Close
                 }
             }
-            _ => Task::none(),
+            Message::KeepScanning => {
+                self.confirm_abort = false;
+                Action::None
+            }
+            _ => Action::None,
         }
     }
 
     /// Render the active screen.
     pub fn view(&self) -> Element<'_, Message> {
+        if self.confirm_abort {
+            use iced::{
+                Length,
+                widget::{button, column, container, row, text},
+            };
+
+            let dialog = container(column![
+                text("Abort the current scan?").size(22),
+                text("Mailbox Scanner will stop its current work and finish cleanup before closing."),
+                row![
+                    button("Keep tab open").on_press(Message::KeepScanning),
+                    button("Abort and close").style(button::danger).on_press(Message::ConfirmAbort),
+                ].spacing(10),
+            ].spacing(12))
+            .padding(20)
+            .max_width(460)
+            .style(container::bordered_box);
+            return container(dialog).center(Length::Fill).into();
+        }
         match &self.scan {
             Some(state) => state.view().map(Message::Scan),
             None => self.setup.view().map(Message::Setup),

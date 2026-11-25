@@ -1,7 +1,9 @@
 use iced::{
-    Length, Task,
+    Length,
     widget::{button, column, row, space, text_editor},
 };
+
+use crate::action::Action;
 
 #[derive(Clone)]
 pub enum Message {
@@ -28,27 +30,27 @@ impl Encoder {
         }
     }
 
-    pub fn update(&mut self, message: Message) -> Task<Message> {
+    pub fn update(&mut self, message: Message) -> Action<Message> {
         match message {
             Message::EncodedChanged(action) => {
                 self.encoded.perform(action);
-                Task::none()
+                Action::None
             }
             Message::DecodedChanged(action) => {
                 self.decoded.perform(action);
-                Task::none()
+                Action::None
             }
             Message::Encode => {
                 let decoded = self.decoded.text();
                 let encoded = (self.encode)(&decoded);
                 self.encoded = text_editor::Content::with_text(&encoded);
-                Task::none()
+                Action::None
             }
             Message::Decode => {
                 let encoded = self.encoded.text();
                 let decoded = (self.decode)(&encoded);
                 self.decoded = text_editor::Content::with_text(&decoded);
-                Task::none()
+                Action::None
             }
         }
     }

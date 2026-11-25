@@ -10,17 +10,21 @@ use iced::{
 };
 
 fn main() -> Result<(), iced::Error> {
-    iced::application(UI::boot, UI::update, UI::view)
+    use tab_manager::TabManager;
+
+    iced::application(TabManager::default, TabManager::update, TabManager::view)
+        .title("Rahn-IT Toolbox")
         .window(iced::window::Settings {
             size: (1400.0, 850.0).into(),
             min_size: Some((1150.0, 700.0).into()),
             exit_on_close_request: false,
             ..Default::default()
         })
-        .subscription(UI::subscription)
+        .subscription(TabManager::subscription)
         .run()
 }
 
+pub mod action;
 pub mod eml;
 pub mod encoder;
 pub mod mailbox_scanner;
@@ -30,7 +34,25 @@ pub mod path_length_checker;
 pub mod quick_install;
 #[cfg(windows)]
 pub mod quick_tools;
+pub mod search;
+pub mod tab_manager;
 
+/// State for a module in the redesigned interface.
+pub enum Module {
+    Search(String),
+    #[cfg(windows)]
+    QuickInstall(quick_install::QuickInstall),
+    #[cfg(windows)]
+    QuickTools(quick_tools::State),
+    Eml(encoder::Encoder),
+    Base64(encoder::Encoder),
+    Unicode(encoder::Encoder),
+    PathLengthChecker(path_length_checker::PathLengthChecker),
+    Nut(nut::Nut),
+    MailboxScanner(mailbox_scanner::App),
+}
+
+#[allow(dead_code)]
 struct UI {
     site: Site,
     encoder: encoder::Encoder,
@@ -72,6 +94,7 @@ pub enum Message {
     MailboxScanner(mailbox_scanner::Message),
 }
 
+#[allow(dead_code)]
 impl UI {
     pub fn boot() -> Self {
         Self {
@@ -90,12 +113,7 @@ impl UI {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::LinkPressed(link) => {
-                let _ = open::that_in_background(match link {
-                    Link::Rust => "https://rust-lang.org",
-                    Link::Iced => "https://iced.rs",
-                    Link::RahnIT => "https://it-rahn.de",
-                });
-
+                link.open();
                 Task::none()
             }
             Message::SwitchSite(site) => {
@@ -155,29 +173,38 @@ impl UI {
                     }
                 }
             }
-            Message::Encoder(message) => self.encoder.update(message).map(Message::Encoder),
+            Message::Encoder(message) => self
+                .encoder
+                .update(message)
+                .into_task()
+                .map(Message::Encoder),
             Message::PathLengthChecker(message) => self
                 .path_length_checker
                 .update(message)
+                .into_task()
                 .map(Message::PathLengthChecker),
             #[cfg(windows)]
             Message::QuickInstall(message) => self
                 .quick_install
                 .update(message)
+                .into_task()
                 .map(Message::QuickInstall),
-            Message::Nut(message) => self.nut.update(message).map(Message::Nut),
+            Message::Nut(message) => self.nut.update(message).into_task().map(Message::Nut),
             #[cfg(windows)]
-            Message::QuickTools(message) => {
-                self.quick_tools.update(message).map(Message::QuickTools)
-            }
+            Message::QuickTools(message) => self
+                .quick_tools
+                .update(message)
+                .into_task()
+                .map(Message::QuickTools),
             Message::MailboxScanner(message) => {
                 if matches!(message, mailbox_scanner::Message::CloseRequested) {
                     self.site = Site::MailboxScanner;
                     self.path_length_checker.cancel_scan();
                 }
-                self.mailbox_scanner
-                    .update(message)
-                    .map(Message::MailboxScanner)
+                match self.mailbox_scanner.update(message) {
+                    action::Action::Close => iced::exit(),
+                    action => action.into_task().map(Message::MailboxScanner),
+                }
             }
         }
     }
@@ -248,6 +275,16 @@ pub enum Link {
     Rust,
     Iced,
     RahnIT,
+}
+
+impl Link {
+    fn open(self) {
+        let _ = open::that_in_background(match self {
+            Self::Rust => "https://rust-lang.org",
+            Self::Iced => "https://iced.rs",
+            Self::RahnIT => "https://it-rahn.de",
+        });
+    }
 }
 
 const FONT_SIZE: f32 = 14.0;

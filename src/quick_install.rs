@@ -68,6 +68,7 @@ pub struct Selection {
 pub struct Installing {
     install_selection: InstallSelection,
     status_message: String,
+    closing: bool,
 }
 
 impl QuickInstall {
@@ -80,7 +81,31 @@ impl QuickInstall {
         })
     }
 
-    pub fn update(&mut self, message: Message) -> Task<Message> {
+    pub fn is_closing(&self) -> bool {
+        matches!(self, Self::Installing(installing) if installing.closing)
+    }
+
+    pub fn close(&mut self) -> crate::action::Action<Message> {
+        match self {
+            Self::Installing(installing) => {
+                installing.closing = true;
+                crate::action::Action::None
+            }
+            Self::Selection(_) => crate::action::Action::Close,
+        }
+    }
+
+    pub fn update(&mut self, message: Message) -> crate::action::Action<Message> {
+        let close = self.is_closing() && matches!(&message, Message::InstallFinished(_));
+        let task = self.update_task(message);
+        if close {
+            crate::action::Action::Close
+        } else {
+            crate::action::Action::Task(task)
+        }
+    }
+
+    fn update_task(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Toggled(installer_id, value) => match self {
                 QuickInstall::Selection(selection) => {
@@ -154,6 +179,7 @@ impl QuickInstall {
         *self = QuickInstall::Installing(Installing {
             install_selection: install_selection.clone(),
             status_message,
+            closing: false,
         });
 
         Task::perform(run_installers(install_selection), Message::InstallFinished)

@@ -55,7 +55,7 @@ impl Monitor {
             Self {
                 status: HashMap::new(),
                 list: Vec::new(),
-                _drop_handle: handle,
+                _drop_handle: handle.abort_on_drop(),
                 error: None,
                 selected: None,
             },
