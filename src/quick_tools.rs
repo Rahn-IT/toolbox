@@ -1,7 +1,7 @@
 //! Select and run built-in Windows maintenance tools.
 
 mod adwcleaner;
-mod clear_chrome_default_extensions;
+mod clear_browser_default_extensions;
 mod disable_hibernation;
 mod set_power_config;
 mod system;
@@ -29,10 +29,10 @@ const TOOLS: &[Tool] = &[
         run: adwcleaner::run,
     },
     Tool {
-        id: "clear-chrome-default-extensions",
-        name: "Clear Chrome Default Extensions",
-        description: "Permanently remove all three Chrome external-extension registry key trees and both Chrome policy key trees (HKLM and HKCU), including every value and subkey. This clears all Chrome policies, not just extension policies. Machine-wide keys may require running Toolbox as administrator. Each location is attempted even if another fails.",
-        run: clear_chrome_default_extensions::run,
+        id: "clear-browser-default-extensions",
+        name: "Clear Browser Default Extensions",
+        description: "Permanently remove three external-extension registry key trees each for Chrome and Firefox, two for Edge, and both policy key trees (HKLM and HKCU) for all three browsers, including every value and subkey. This clears all registry policies for Chrome, Firefox, and Edge, not just extension policies. Firefox policies.json files and installed profile extensions are left untouched. Machine-wide keys may require running Toolbox as administrator. Each of the fourteen locations is attempted even if another fails.",
+        run: clear_browser_default_extensions::run,
     },
     Tool {
         id: "disable-hibernation",

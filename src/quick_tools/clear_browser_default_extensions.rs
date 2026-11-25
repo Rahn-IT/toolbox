@@ -1,4 +1,4 @@
-//! Remove the five Chrome external-extension and policy registry trees.
+//! Remove Chrome, Firefox, and Edge external-extension and policy registry trees.
 
 use std::{
     os::windows::process::CommandExt,
@@ -11,6 +11,15 @@ const LOCATIONS: &[&str] = &[
     r"HKCU\SOFTWARE\Google\Chrome\Extensions",
     r"HKLM\SOFTWARE\Policies\Google\Chrome",
     r"HKCU\SOFTWARE\Policies\Google\Chrome",
+    r"HKLM\SOFTWARE\Mozilla\Firefox\Extensions",
+    r"HKLM\SOFTWARE\WOW6432Node\Mozilla\Firefox\Extensions",
+    r"HKCU\SOFTWARE\Mozilla\Firefox\Extensions",
+    r"HKLM\SOFTWARE\Policies\Mozilla\Firefox",
+    r"HKCU\SOFTWARE\Policies\Mozilla\Firefox",
+    r"HKLM\SOFTWARE\Microsoft\Edge\Extensions",
+    r"HKLM\SOFTWARE\WOW6432Node\Microsoft\Edge\Extensions",
+    r"HKLM\SOFTWARE\Policies\Microsoft\Edge",
+    r"HKCU\SOFTWARE\Policies\Microsoft\Edge",
 ];
 
 pub(super) fn run() -> Result<String, String> {
@@ -136,12 +145,22 @@ mod tests {
             }
         });
         assert_eq!(attempted, LOCATIONS);
-        assert_eq!(report.failed, 3);
-        assert!(report.text.contains("Cleared 2 of 5 locations"));
+        assert_eq!(report.failed, 9);
+        assert!(report.text.contains("Cleared 5 of 14 locations"));
         assert!(
             report
                 .text
                 .contains("HKCU\\SOFTWARE\\Policies\\Google\\Chrome: deleted.")
+        );
+        assert!(
+            report
+                .text
+                .contains("HKCU\\SOFTWARE\\Policies\\Mozilla\\Firefox: deleted.")
+        );
+        assert!(
+            report
+                .text
+                .contains("HKCU\\SOFTWARE\\Policies\\Microsoft\\Edge: deleted.")
         );
     }
 
@@ -149,7 +168,7 @@ mod tests {
     fn reports_all_successes() {
         let report = clear_with(|_| Ok("deleted"));
         assert_eq!(report.failed, 0);
-        assert!(report.text.contains("Cleared 5 of 5 locations"));
+        assert!(report.text.contains("Cleared 14 of 14 locations"));
     }
 
     #[test]
