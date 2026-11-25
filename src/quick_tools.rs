@@ -6,11 +6,10 @@ pub mod disable_hibernation;
 pub mod set_power_config;
 pub mod temp_files;
 
-mod loading;
 pub(crate) mod system;
 
 use iced::{
-    Alignment, Element, Length, Task, Theme,
+    Element, Length, Task, Theme,
     widget::{column, container, scrollable, text},
 };
 
@@ -81,21 +80,14 @@ impl State {
 
     pub fn view(&self) -> Element<'_, Message> {
         match &self.status {
-            Status::Running { closing } => container(
-                column![
-                    Element::new(loading::Spinner),
-                    text(self.title).size(24),
-                    text(if *closing {
-                        "Closing when the operation finishes…"
-                    } else {
-                        "Running…"
-                    }),
-                ]
-                .spacing(10)
-                .align_x(Alignment::Center),
-            )
-            .center(Length::Fill)
-            .into(),
+            Status::Running { closing } => crate::loading::screen(
+                Some(self.title),
+                if *closing {
+                    "Closing when the operation finishes…"
+                } else {
+                    "Running…"
+                },
+            ),
             Status::Finished(result) => {
                 let (status, details) = match result {
                     Ok(details) => ("Completed", details),

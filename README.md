@@ -73,6 +73,10 @@ Open Wake on LAN from Search, enter the device's MAC address, and select **Wake*
 
 On Windows and Linux, select an entry from the local ARP cache to fill in its MAC address. **Refresh** rereads the cache.
 
+## Network Scan
+
+On Windows and Linux, open Network Scan from Search and select an IPv4 interface to start discovery. Toolbox sends ping requests and reads the interface's ARP cache, so devices can appear even without a ping reply. Select a row for its addresses and available NetBIOS names, or use **Rescan** to repeat discovery. Linux uses the installed `ip` and `ping` utilities and skips NetBIOS if Samba's `nmblookup` is absent.
+
 ## Simple NUT client
 
 I integrated a very simple client which displays the raw numbers from a Network UPS Tools server for debugging.

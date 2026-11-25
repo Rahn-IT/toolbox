@@ -7,7 +7,7 @@ use iced::{
 use crate::{
     OpenedModule,
     encoder::{Encoder, Encoding},
-    mailbox_scanner, nut, path_length_checker, wake_on_lan,
+    mailbox_scanner, network_scanner, nut, path_length_checker, wake_on_lan,
 };
 #[cfg(windows)]
 use crate::{
@@ -65,6 +65,7 @@ const TOOLS: &[Tool] = &[
     ),
     Tool::new(nut::Nut::TITLE, nut::Nut::new),
     Tool::new(wake_on_lan::State::TITLE, wake_on_lan::State::new),
+    Tool::new(network_scanner::State::TITLE, network_scanner::State::new),
     Tool::new(mailbox_scanner::App::TITLE, mailbox_scanner::App::new),
     #[cfg(windows)]
     Tool::new(adwcleaner::TITLE, adwcleaner::new),

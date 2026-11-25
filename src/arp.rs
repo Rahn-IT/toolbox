@@ -1,5 +1,20 @@
 use std::net::Ipv4Addr;
 
+pub(crate) enum Scope<'a> {
+    All,
+    Interface { local_ip: Ipv4Addr, device: &'a str },
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+impl Scope<'_> {
+    fn describe_error(&self, error: String) -> String {
+        match self {
+            Self::All => error,
+            Self::Interface { local_ip, device } => format!("{device} ({local_ip}): {error}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Device {
     pub ip: Ipv4Addr,
@@ -14,37 +29,47 @@ impl Device {
 }
 
 #[cfg(windows)]
-pub(super) async fn read() -> Result<Vec<Device>, String> {
-    let executable = crate::quick_tools::system::executable("arp.exe")?;
-    let output = tokio::process::Command::new(executable)
+pub(crate) async fn read(scope: Scope<'_>) -> Result<Vec<Device>, String> {
+    let executable = crate::quick_tools::system::executable("arp.exe")
+        .map_err(|error| scope.describe_error(error))?;
+    let mut command = tokio::process::Command::new(executable);
+    command
         .arg("-a")
         .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    if let Scope::Interface { local_ip, .. } = scope {
+        command.args(["-N", &local_ip.to_string()]);
+    }
+    let output = command
         .output()
         .await
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| scope.describe_error(error.to_string()))?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr);
         let details = error.trim();
-        return Err(if details.is_empty() {
+        return Err(scope.describe_error(if details.is_empty() {
             format!("arp.exe exited with {}", output.status)
         } else {
             details.to_owned()
-        });
+        }));
     }
     Ok(parse_windows(&String::from_utf8_lossy(&output.stdout)))
 }
 
 #[cfg(target_os = "linux")]
-pub(super) async fn read() -> Result<Vec<Device>, String> {
+pub(crate) async fn read(scope: Scope<'_>) -> Result<Vec<Device>, String> {
     let table = tokio::fs::read_to_string("/proc/net/arp")
         .await
-        .map_err(|error| error.to_string())?;
-    Ok(parse_linux(&table))
+        .map_err(|error| scope.describe_error(error.to_string()))?;
+    let device = match scope {
+        Scope::All => None,
+        Scope::Interface { device, .. } => Some(device),
+    };
+    Ok(parse_linux(&table, device))
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-pub(super) async fn read() -> Result<Vec<Device>, String> {
+pub(crate) async fn read(_scope: Scope<'_>) -> Result<Vec<Device>, String> {
     Err("Reading the ARP cache is supported on Windows and Linux.".into())
 }
 
@@ -57,7 +82,7 @@ fn parse_windows(table: &str) -> Vec<Device> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn parse_linux(table: &str) -> Vec<Device> {
+fn parse_linux(table: &str, interface: Option<&str>) -> Vec<Device> {
     const ATF_COM: u32 = 0x02;
     collect_devices(table.lines().skip(1).filter_map(|line| {
         let mut fields = line.split_ascii_whitespace();
@@ -67,14 +92,21 @@ fn parse_linux(table: &str) -> Vec<Device> {
         if flags & ATF_COM == 0 {
             return None;
         }
-        device(ip, fields.next()?)
+        let mac = fields.next()?;
+        if let Some(interface) = interface {
+            let entry_interface = fields.nth(1)?;
+            if entry_interface != interface {
+                return None;
+            }
+        }
+        device(ip, mac)
     }))
 }
 
 #[cfg(any(windows, target_os = "linux", test))]
 fn device(ip: &str, mac: &str) -> Option<Device> {
     let ip: Ipv4Addr = ip.parse().ok()?;
-    let mac = super::parse_mac(mac)?;
+    let mac = parse_mac(mac)?;
     // Broadcast, multicast and incomplete mappings cannot identify a wake target.
     if ip.is_unspecified()
         || ip.is_multicast()
@@ -93,6 +125,26 @@ fn collect_devices(entries: impl Iterator<Item = Device>) -> Vec<Device> {
     devices.sort_unstable();
     devices.dedup();
     devices
+}
+
+pub(crate) fn parse_mac(value: &str) -> Option<[u8; 6]> {
+    let stride = match value.len() {
+        12 => 2,
+        17 => 3,
+        _ => return None,
+    };
+    let mut mac = [0; 6];
+    for (index, octet) in mac.iter_mut().enumerate() {
+        let start = index * stride;
+        let hex = value.get(start..start + 2)?;
+        if !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || (stride == 3 && index < 5 && !matches!(value.as_bytes()[start + 2], b':' | b'-'))
+        {
+            return None;
+        }
+        *octet = u8::from_str_radix(hex, 16).ok()?;
+    }
+    Some(mac)
 }
 
 #[cfg(test)]
@@ -119,9 +171,20 @@ mod tests {
             192.168.1.2 0x1 0x2 02:aa:bb:cc:dd:ee * eth0\n\
             192.168.1.3 0x1 0x0 00:00:00:00:00:00 * eth0\n\
             192.168.1.4 0x1 0x0 02:aa:bb:cc:dd:ff * eth0";
-        let devices = parse_linux(table);
+        let devices = parse_linux(table, None);
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].ip, Ipv4Addr::new(192, 168, 1, 2));
         assert_eq!(devices[0].mac_address(), "02:AA:BB:CC:DD:EE");
+    }
+
+    #[test]
+    fn linux_scope_selects_the_matching_interface_before_deduplication() {
+        let table = "IP address HW type Flags HW address Mask Device\n\
+            192.168.1.2 0x1 0x2 02:aa:bb:cc:dd:ee * eth0\n\
+            192.168.1.2 0x1 0x2 02:aa:bb:cc:dd:ff * eth1";
+        assert_eq!(parse_linux(table, None).len(), 2);
+        let devices = parse_linux(table, Some("eth1"));
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].mac_address(), "02:AA:BB:CC:DD:FF");
     }
 }

@@ -1,24 +1,45 @@
 use std::{f32::consts::TAU, time::Duration};
 
 use iced::{
-    Border, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
+    Alignment, Border, Element, Event, Length, Point, Rectangle, Renderer, Size, Theme, Vector,
     advanced::{
         Clipboard, Layout, Renderer as _, Shell, Widget, layout, mouse, renderer,
         widget::{Tree, tree},
     },
     time::Instant,
+    widget::{Column, column, container, text},
     window,
 };
-
-use super::Message;
 
 const SIZE: Length = Length::Fixed(36.0);
 const INTERVAL: Duration = Duration::from_millis(65);
 const DOTS: usize = 12;
 
-pub(super) struct Spinner;
+pub(crate) fn screen<'a, Message: 'a>(
+    title: Option<&'a str>,
+    status: &'a str,
+) -> Element<'a, Message> {
+    container(content(title, status))
+        .center(Length::Fill)
+        .into()
+}
 
-impl Widget<Message, Theme, Renderer> for Spinner {
+pub(crate) fn content<'a, Message: 'a>(
+    title: Option<&'a str>,
+    status: &'a str,
+) -> Column<'a, Message> {
+    column![
+        Element::new(Spinner),
+        title.map(|title| text(title).size(24)),
+        text(status)
+    ]
+    .spacing(10)
+    .align_x(Alignment::Center)
+}
+
+struct Spinner;
+
+impl<Message> Widget<Message, Theme, Renderer> for Spinner {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<Self>()
     }

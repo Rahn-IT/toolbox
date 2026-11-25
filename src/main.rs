@@ -25,9 +25,12 @@ fn main() -> Result<(), iced::Error> {
 }
 
 pub mod action;
+mod arp;
 pub mod eml;
 pub mod encoder;
+mod loading;
 pub mod mailbox_scanner;
+pub mod network_scanner;
 pub mod nut;
 pub mod path_length_checker;
 #[cfg(windows)]
@@ -51,6 +54,7 @@ pub enum Module {
     PathLengthChecker(path_length_checker::PathLengthChecker),
     Nut(nut::Nut),
     WakeOnLan(wake_on_lan::State),
+    NetworkDevices(network_scanner::State),
     MailboxScanner(mailbox_scanner::App),
 }
 

@@ -10,8 +10,8 @@ use tokio::net::UdpSocket;
 use crate::tab_manager::TabMessage;
 use crate::{Module, OpenedModule, action::Action};
 
-mod arp;
-pub use arp::Device;
+pub use crate::arp::Device;
+use crate::arp::{self, parse_mac};
 
 #[derive(Clone)]
 pub enum Message {
@@ -150,7 +150,8 @@ impl State {
 
     fn load_devices(&mut self) -> Task<Message> {
         self.device_error = None;
-        let (task, handle) = Task::perform(arp::read(), Message::DevicesLoaded).abortable();
+        let (task, handle) =
+            Task::perform(arp::read(arp::Scope::All), Message::DevicesLoaded).abortable();
         self.loading_devices = Some(handle.abort_on_drop());
         task
     }
@@ -191,26 +192,6 @@ impl State {
             .height(Length::Fill)
             .into()
     }
-}
-
-fn parse_mac(value: &str) -> Option<[u8; 6]> {
-    let stride = match value.len() {
-        12 => 2,
-        17 => 3,
-        _ => return None,
-    };
-    let mut mac = [0; 6];
-    for (index, octet) in mac.iter_mut().enumerate() {
-        let start = index * stride;
-        let hex = value.get(start..start + 2)?;
-        if !hex.bytes().all(|byte| byte.is_ascii_hexdigit())
-            || (stride == 3 && index < 5 && !matches!(value.as_bytes()[start + 2], b':' | b'-'))
-        {
-            return None;
-        }
-        *octet = u8::from_str_radix(hex, 16).ok()?;
-    }
-    Some(mac)
 }
 
 async fn send_magic_packet(mac: [u8; 6]) -> io::Result<()> {

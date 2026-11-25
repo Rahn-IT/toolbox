@@ -7,7 +7,10 @@ use iced::{
 };
 
 use crate::action::Action;
-use crate::{Module, encoder, mailbox_scanner, nut, path_length_checker, search, wake_on_lan};
+use crate::{
+    Module, encoder, mailbox_scanner, network_scanner, nut, path_length_checker, search,
+    wake_on_lan,
+};
 #[cfg(windows)]
 use crate::{quick_install, quick_tools};
 
@@ -28,6 +31,7 @@ pub enum TabMessage {
     PathLengthChecker(path_length_checker::Message),
     Nut(nut::Message),
     WakeOnLan(wake_on_lan::Message),
+    NetworkDevices(network_scanner::Message),
     MailboxScanner(mailbox_scanner::Message),
     #[cfg(windows)]
     QuickInstall(quick_install::Message),
@@ -272,6 +276,9 @@ impl TabManager {
             (Module::WakeOnLan(state), TabMessage::WakeOnLan(message)) => {
                 state.update(message).map(TabMessage::WakeOnLan)
             }
+            (Module::NetworkDevices(state), TabMessage::NetworkDevices(message)) => {
+                state.update(message).map(TabMessage::NetworkDevices)
+            }
             (Module::MailboxScanner(state), TabMessage::MailboxScanner(message)) => {
                 state.update(message).map(TabMessage::MailboxScanner)
             }
@@ -378,6 +385,7 @@ impl Module {
             Self::PathLengthChecker(_) => path_length_checker::PathLengthChecker::TITLE,
             Self::Nut(_) => nut::Nut::TITLE,
             Self::WakeOnLan(_) => wake_on_lan::State::TITLE,
+            Self::NetworkDevices(_) => network_scanner::State::TITLE,
             Self::MailboxScanner(_) => mailbox_scanner::App::TITLE,
             #[cfg(windows)]
             Self::QuickInstall(_) => quick_install::QuickInstall::TITLE,
@@ -395,6 +403,7 @@ impl Module {
             Self::PathLengthChecker(state) => state.view().map(TabMessage::PathLengthChecker),
             Self::Nut(state) => state.view().map(TabMessage::Nut),
             Self::WakeOnLan(state) => state.view().map(TabMessage::WakeOnLan),
+            Self::NetworkDevices(state) => state.view().map(TabMessage::NetworkDevices),
             Self::MailboxScanner(state) => state.view().map(TabMessage::MailboxScanner),
             #[cfg(windows)]
             Self::QuickInstall(state) => state.view().map(TabMessage::QuickInstall),
