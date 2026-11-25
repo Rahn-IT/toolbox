@@ -1,14 +1,19 @@
 use iced::{
-    Alignment, Element, Font, Length,
-    widget::{button, column, container, pick_list, progress_bar, row, rule, scrollable, text},
+    Alignment, Border, Color, Element, Font, Length, Padding, Theme, color,
+    widget::{
+        button, column, container, pick_list, progress_bar, row, rule, scrollable, text, text_input,
+    },
 };
-use std::net::Ipv4Addr;
 
 use super::{
     Message, State,
+    ports::{Outcome, PORTS},
     scan::{Observation, Progress},
 };
 use crate::loading;
+
+const TABLE_RIGHT_INSET: f32 = 8.0;
+const TABLE_SCROLLBAR_WIDTH: f32 = 10.0;
 
 pub(super) fn render(state: &State) -> Element<'_, Message> {
     let interfaces = match &state.interfaces {
@@ -46,7 +51,25 @@ pub(super) fn render(state: &State) -> Element<'_, Message> {
         None
     };
 
-    let mut content = column![controls, status].spacing(14);
+    let mut content = column![
+        controls,
+        text_input("Filter by IP, MAC address, or name", &state.filter)
+            .on_input(Message::FilterChanged)
+            .padding([8, 12]),
+        status,
+    ]
+    .spacing(14);
+    if state.port_task.is_some()
+        && let Some(report) = &state.results
+    {
+        content = content.push(scan_loading(Progress::Ports {
+            done: state.port_completed,
+            total: report.devices.len() * PORTS.len(),
+        }));
+    }
+    if let Some(notice) = &state.port_notice {
+        content = content.push(text(notice));
+    }
     if state.loading_scan.is_some() {
         content = content.push(scan_loading(state.progress));
     }
@@ -57,7 +80,7 @@ pub(super) fn render(state: &State) -> Element<'_, Message> {
         if report.devices.is_empty() {
             content = content.push(text("No devices found."));
         } else {
-            content = content.push(table(&report.devices, state.device));
+            content = content.push(table(&report.devices, state));
         }
     }
     screen(content)
@@ -69,6 +92,8 @@ fn scan_loading(progress: Progress) -> Element<'static, Message> {
         Progress::Ping { done, total } => ("Sending ping requests…", Some((done, total))),
         Progress::Arp => ("Reading ARP cache…", None),
         Progress::NetBios { done, total } => ("Looking up NetBIOS names…", Some((done, total))),
+        Progress::ReverseDns { done, total } => ("Looking up hostnames…", Some((done, total))),
+        Progress::Ports { done, total } => ("Checking TCP ports…", Some((done, total))),
     };
     let mut indicator = loading::content(None, label);
     if let Some((done, total)) = count {
@@ -86,13 +111,16 @@ fn screen<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> 
     container(content).width(Length::Fill).padding(24).into()
 }
 
-fn table(devices: &[Observation], selected: Option<Ipv4Addr>) -> Element<'_, Message> {
-    let rows = column(devices.iter().map(|device| {
-        let style = if selected == Some(device.ip) {
-            button::primary
-        } else {
-            button::secondary
-        };
+fn table<'a>(devices: &'a [Observation], state: &'a State) -> Element<'a, Message> {
+    let filter = state.filter.trim().to_lowercase();
+    let mut devices = devices
+        .iter()
+        .filter(|device| matches_filter(device, &filter))
+        .peekable();
+    if devices.peek().is_none() {
+        return text("No devices match the filter.").into();
+    }
+    let rows = column(devices.map(|device| {
         button(
             row![
                 text(device.ip.to_string()).width(125),
@@ -105,80 +133,118 @@ fn table(devices: &[Observation], selected: Option<Ipv4Addr>) -> Element<'_, Mes
                 )
                 .font(Font::MONOSPACE)
                 .width(165),
-                text(device.names.first().map_or("—", |name| name.name.as_str()))
-                    .width(Length::Fill),
-                ping_label(device.ping_reply).width(90),
+                text(device.hostname.as_deref().unwrap_or("—")).width(Length::Fill),
+                text(device.names.first().map_or("—", |name| name.name.as_str())).width(145),
+                ping_label(device.ping_reply),
+                text(open_ports(state, device)).width(150),
             ]
-            .spacing(12),
+            .spacing(12)
+            .align_y(Alignment::Center),
         )
         .width(Length::Fill)
         .padding([10, 12])
-        .style(style)
-        .on_press(Message::SelectDevice(device.ip))
+        .style(device_row_style)
+        .on_press(Message::OpenDevice(device.ip))
         .into()
     }))
     .spacing(6);
 
-    let table = column![
+    column![
         container(
             row![
                 text("IPv4 address").width(125),
                 text("MAC address").width(165),
-                text("NetBIOS").width(Length::Fill),
+                text("Hostname").width(Length::Fill),
+                text("NetBIOS").width(145),
                 text("Ping reply").width(90),
+                text("Open ports").width(150),
             ]
             .spacing(12)
         )
-        .padding([0, 12]),
+        .padding(
+            Padding::default()
+                .left(12)
+                .right(12.0 + TABLE_RIGHT_INSET + TABLE_SCROLLBAR_WIDTH)
+        ),
         rule::horizontal(1),
-        scrollable(rows).height(Length::Fill),
+        scrollable(rows)
+            .direction(scrollable::Direction::Vertical(
+                scrollable::Scrollbar::new()
+                    .width(TABLE_SCROLLBAR_WIDTH)
+                    .scroller_width(TABLE_SCROLLBAR_WIDTH)
+                    .spacing(TABLE_RIGHT_INSET)
+            ))
+            .height(Length::Fill),
     ]
     .width(Length::Fill)
-    .spacing(8);
-
-    let mut detail = column![text("Device details").size(20)].spacing(10);
-    if let Some(device) = devices.iter().find(|device| selected == Some(device.ip)) {
-        detail = detail
-            .push(text(device.ip.to_string()))
-            .push(text(match device.ping_reply {
-                Some(true) => "Ping reply received",
-                Some(false) => "Found in ARP cache without a ping reply",
-                None => "Found in ARP cache",
-            }));
-        for address in &device.addresses {
-            detail = detail.push(text(address.mac_address()).font(Font::MONOSPACE));
-        }
-        for name in &device.names {
-            detail = detail.push(text(format!("{} <{:02X}>", name.name, name.suffix)));
-        }
-    } else {
-        detail = detail.push(text("Select a device."));
-    }
-
-    row![
-        table,
-        container(scrollable(detail))
-            .padding(16)
-            .width(260)
-            .style(container::bordered_box),
-    ]
-    .spacing(20)
+    .spacing(8)
     .into()
 }
 
-fn ping_label(reply: Option<bool>) -> iced::widget::Text<'static> {
-    match reply {
-        Some(replied) => {
-            text(if replied { "Yes" } else { "No" }).style(move |theme: &iced::Theme| {
-                let palette = theme.extended_palette();
-                let color = if replied {
-                    palette.success.base.color
-                } else {
-                    palette.danger.base.color
-                };
-                text::Style { color: Some(color) }
-            })
-        }
-        None => text("—"),
+fn matches_filter(device: &Observation, filter: &str) -> bool {
+    filter.is_empty()
+        || device.ip.to_string().contains(filter)
+        || device
+            .addresses
+            .iter()
+            .any(|entry| entry.mac_address().to_ascii_lowercase().contains(filter))
+        || device
+            .hostname
+            .as_ref()
+            .is_some_and(|name| name.to_lowercase().contains(filter))
+        || device
+            .names
+            .iter()
+            .any(|entry| entry.name.to_lowercase().contains(filter))
+}
+
+fn device_row_style(theme: &Theme, status: button::Status) -> button::Style {
+    let background = theme.extended_palette().background;
+    let surface = match status {
+        button::Status::Hovered => background.weak,
+        button::Status::Pressed => background.strong,
+        _ => background.base,
+    };
+    button::Style {
+        background: Some(surface.color.into()),
+        text_color: surface.text,
+        border: Border {
+            color: background.weak.color,
+            width: 1.0,
+            radius: 6.0.into(),
+        },
+        ..button::Style::default()
     }
+}
+
+fn open_ports(state: &State, device: &Observation) -> String {
+    let Some(results) = state.port_results.get(&device.ip) else {
+        return "—".into();
+    };
+    let ports = results
+        .iter()
+        .filter(|(_, outcome)| **outcome == Outcome::Open)
+        .map(|(port, _)| port.to_string())
+        .collect::<Vec<_>>();
+    if ports.is_empty() {
+        "—".into()
+    } else {
+        ports.join(", ")
+    }
+}
+
+fn ping_label(reply: Option<bool>) -> Element<'static, Message> {
+    let Some(replied) = reply else {
+        return container(text("—")).width(90).into();
+    };
+    let (label, background) = if replied {
+        ("Yes", color!(0x167344))
+    } else {
+        ("No", color!(0xB32539))
+    };
+    let badge = container(text(label).size(14).color(Color::WHITE))
+        .center_x(48)
+        .padding([3, 8])
+        .style(move |_| container::background(background).border(Border::default().rounded(5.0)));
+    container(badge).width(90).into()
 }

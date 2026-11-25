@@ -18,9 +18,11 @@ impl Installer for DiscordInstaller {
 
     fn install(&self) -> InstallFuture<'_> {
         Box::pin(async move {
-            let path =
-                download_to_temp("https://discord.com/api/download?platform=win", "discord.exe")
-                    .await?;
+            let path = download_to_temp(
+                "https://discord.com/api/download?platform=win",
+                "discord.exe",
+            )
+            .await?;
 
             let result = run_elevated_installer(&path, &["-S"]).await;
             remove_file_if_exists(&path).await;

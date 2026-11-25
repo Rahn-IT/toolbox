@@ -75,7 +75,15 @@ On Windows and Linux, select an entry from the local ARP cache to fill in its MA
 
 ## Network Scan
 
-On Windows and Linux, open Network Scan from Search and select an IPv4 interface to start discovery. Toolbox sends ping requests and reads the interface's ARP cache, so devices can appear even without a ping reply. Select a row for its addresses and available NetBIOS names, or use **Rescan** to repeat discovery. Linux uses the installed `ip` and `ping` utilities and skips NetBIOS if Samba's `nmblookup` is absent.
+A relatively simple network scan based on just calling `ping` and checking the ARP-Table.
+
+Afterwards, Additional Info is collected for netbios and reverse dns name as well as ports.
+
+Not as sophisticated as nmap, but enough for a rough overview.
+
+## Device Scan
+
+Type in the IP of a device to perform a simple scan on only that device instead of the whole network
 
 ## Simple NUT client
 

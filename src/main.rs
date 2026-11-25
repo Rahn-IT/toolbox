@@ -31,6 +31,7 @@ pub mod encoder;
 mod loading;
 pub mod mailbox_scanner;
 pub mod network_scanner;
+pub use network_scanner::device_scan;
 pub mod nut;
 pub mod path_length_checker;
 #[cfg(windows)]
@@ -55,6 +56,7 @@ pub enum Module {
     Nut(nut::Nut),
     WakeOnLan(wake_on_lan::State),
     NetworkDevices(network_scanner::State),
+    DeviceScan(device_scan::State),
     MailboxScanner(mailbox_scanner::App),
 }
 

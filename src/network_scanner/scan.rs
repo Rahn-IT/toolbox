@@ -8,14 +8,14 @@ use futures_util::{StreamExt, stream};
 use iced::task::{Sipper, sipper};
 use tokio::sync::Semaphore;
 
-use super::{interfaces, netbios, ping};
+use super::{interfaces, netbios, ping, reverse_dns};
 use crate::arp::{self, Device, Scope};
 
-const MAX_HOSTS: u32 = 4094;
+pub(super) const MAX_HOSTS: u32 = 4094;
 const PING_CONCURRENCY: usize = 32;
-const NAME_CONCURRENCY: usize = 8;
+const NAME_CONCURRENCY: usize = 32;
 const PROGRESS_BATCH: usize = 8;
-static PROBES: Semaphore = Semaphore::const_new(PING_CONCURRENCY);
+pub(super) static PROBES: Semaphore = Semaphore::const_new(PING_CONCURRENCY);
 
 #[derive(Clone, Copy)]
 pub enum Progress {
@@ -23,6 +23,14 @@ pub enum Progress {
     Ping { done: usize, total: usize },
     Arp,
     NetBios { done: usize, total: usize },
+    ReverseDns { done: usize, total: usize },
+    Ports { done: usize, total: usize },
+}
+
+#[derive(Clone)]
+pub enum Update {
+    Progress(Progress),
+    Rows(Vec<Observation>),
 }
 
 #[derive(Clone, Default)]
@@ -32,11 +40,12 @@ pub struct Report {
 }
 
 #[derive(Clone)]
-pub(super) struct Observation {
-    pub ip: Ipv4Addr,
-    pub ping_reply: Option<bool>,
-    pub addresses: Vec<Device>,
-    pub names: Vec<netbios::Name>,
+pub struct Observation {
+    pub(super) ip: Ipv4Addr,
+    pub(super) ping_reply: Option<bool>,
+    pub(super) addresses: Vec<Device>,
+    pub(super) names: Vec<netbios::Name>,
+    pub(super) hostname: Option<String>,
 }
 
 impl Observation {
@@ -46,11 +55,12 @@ impl Observation {
             ping_reply: None,
             addresses: Vec::new(),
             names: Vec::new(),
+            hostname: None,
         }
     }
 }
 
-pub(super) fn discover(interface: interfaces::Interface) -> impl Sipper<Report, Progress> + Send {
+pub(super) fn discover(interface: interfaces::Interface) -> impl Sipper<Report, Update> + Send {
     sipper(move |mut sender| async move {
         let mut report = Report::default();
         let mut devices = BTreeMap::new();
@@ -76,7 +86,9 @@ pub(super) fn discover(interface: interfaces::Interface) -> impl Sipper<Report, 
                     let (first, last) = host_bounds(&interface);
                     let total = (last - first) as usize;
                     if total > 0 {
-                        sender.send(Progress::Ping { done: 0, total }).await;
+                        sender
+                            .send(Update::Progress(Progress::Ping { done: 0, total }))
+                            .await;
                     }
                     let runner = &runner;
                     let device = interface.name.as_str();
@@ -90,16 +102,16 @@ pub(super) fn discover(interface: interfaces::Interface) -> impl Sipper<Report, 
                     .buffer_unordered(PING_CONCURRENCY);
                     let mut first_error = None;
                     let mut done = 0;
+                    let mut rows = Vec::new();
                     while let Some((ip, outcome)) = replies.next().await {
                         match outcome {
                             ping::Outcome::Reply => {
-                                devices.insert(
-                                    ip,
-                                    Observation {
-                                        ping_reply: Some(true),
-                                        ..Observation::new(ip)
-                                    },
-                                );
+                                let observation = Observation {
+                                    ping_reply: Some(true),
+                                    ..Observation::new(ip)
+                                };
+                                rows.push(observation.clone());
+                                devices.insert(ip, observation);
                             }
                             ping::Outcome::Failed(error) => {
                                 first_error.get_or_insert(error);
@@ -110,7 +122,12 @@ pub(super) fn discover(interface: interfaces::Interface) -> impl Sipper<Report, 
                         }
                         done += 1;
                         if done % PROGRESS_BATCH == 0 || done == total {
-                            sender.send(Progress::Ping { done, total }).await;
+                            if !rows.is_empty() {
+                                sender.send(Update::Rows(std::mem::take(&mut rows))).await;
+                            }
+                            sender
+                                .send(Update::Progress(Progress::Ping { done, total }))
+                                .await;
                         }
                     }
                     if let Some(error) = first_error {
@@ -123,7 +140,7 @@ pub(super) fn discover(interface: interfaces::Interface) -> impl Sipper<Report, 
             }
         }
 
-        sender.send(Progress::Arp).await;
+        sender.send(Update::Progress(Progress::Arp)).await;
         match tokio::time::timeout(
             Duration::from_secs(5),
             arp::read(Scope::Interface {
@@ -157,75 +174,135 @@ pub(super) fn discover(interface: interfaces::Interface) -> impl Sipper<Report, 
         }
 
         report.devices = devices.into_values().collect();
+        if !report.devices.is_empty() {
+            sender.send(Update::Rows(report.devices.clone())).await;
+        }
         if can_probe && !report.devices.is_empty() {
             match interfaces::verify_route(&interface).await {
-                Ok(()) => return read_names(report).run(sender).await,
+                Ok(()) => match netbios::prepare() {
+                    Ok(Some(runner)) => {
+                        report = read_names(report, NameLookup::NetBios(runner))
+                            .run(sender.clone())
+                            .await;
+                    }
+                    Ok(None) => report.notices.push(
+                        "NetBIOS lookup skipped because the system lookup utility is unavailable."
+                            .into(),
+                    ),
+                    Err(error) => report
+                        .notices
+                        .push(format!("NetBIOS lookup unavailable: {error}")),
+                },
                 Err(error) => report
                     .notices
                     .push(format!("NetBIOS lookup skipped: {error}")),
+            }
+            match reverse_dns::prepare() {
+                Ok(resolver) => {
+                    return read_names(report, NameLookup::ReverseDns(resolver))
+                        .run(sender)
+                        .await;
+                }
+                Err(error) => report
+                    .notices
+                    .push(format!("Reverse lookup unavailable: {error}")),
             }
         }
         report
     })
 }
 
-fn read_names(mut report: Report) -> impl Sipper<Report, Progress> + Send {
+enum NameLookup {
+    NetBios(netbios::Runner),
+    ReverseDns(reverse_dns::Resolver),
+}
+
+enum Names {
+    NetBios(Vec<netbios::Name>),
+    Hostname(String),
+}
+
+impl NameLookup {
+    fn progress(&self, done: usize, total: usize) -> Progress {
+        match self {
+            Self::NetBios(_) => Progress::NetBios { done, total },
+            Self::ReverseDns(_) => Progress::ReverseDns { done, total },
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::NetBios(_) => "NetBIOS",
+            Self::ReverseDns(_) => "reverse",
+        }
+    }
+
+    async fn lookup(&self, ip: Ipv4Addr) -> Result<Option<Names>, String> {
+        match self {
+            Self::NetBios(runner) => match runner.lookup(ip).await {
+                netbios::Outcome::Found(names) => Ok(Some(Names::NetBios(names))),
+                netbios::Outcome::NoReply => Ok(None),
+                netbios::Outcome::Failed(error) => Err(error),
+            },
+            Self::ReverseDns(resolver) => Ok(resolver.lookup(ip).await?.map(Names::Hostname)),
+        }
+    }
+}
+
+fn read_names(mut report: Report, lookup: NameLookup) -> impl Sipper<Report, Update> + Send {
     sipper(move |mut sender| async move {
-        let runner = match netbios::prepare() {
-            Ok(Some(runner)) => runner,
-            Ok(None) => {
-                report.notices.push(
-                    "NetBIOS lookup skipped because the system lookup utility is unavailable."
-                        .into(),
-                );
-                return report;
-            }
-            Err(error) => {
-                report
-                    .notices
-                    .push(format!("NetBIOS lookup unavailable: {error}"));
-                return report;
-            }
-        };
-        let runner = &runner;
+        let lookup = &lookup;
         let addresses = report
             .devices
             .iter()
             .map(|device| device.ip)
             .collect::<Vec<_>>();
         let total = addresses.len();
-        sender.send(Progress::NetBios { done: 0, total }).await;
+        sender
+            .send(Update::Progress(lookup.progress(0, total)))
+            .await;
         let mut names = stream::iter(addresses.into_iter().enumerate().map(
             |(index, ip)| async move {
                 let _permit = PROBES
                     .acquire()
                     .await
                     .expect("the probe semaphore stays open");
-                (index, runner.lookup(ip).await)
+                (index, lookup.lookup(ip).await)
             },
         ))
         .buffer_unordered(NAME_CONCURRENCY);
         let mut first_error = None;
         let mut done = 0;
+        let mut rows = Vec::new();
         while let Some((index, outcome)) = names.next().await {
             match outcome {
-                netbios::Outcome::Found(names) => {
+                Ok(Some(Names::NetBios(names))) => {
                     report.devices[index].names = names;
+                    rows.push(report.devices[index].clone());
                 }
-                netbios::Outcome::NoReply => {}
-                netbios::Outcome::Failed(error) => {
+                Ok(Some(Names::Hostname(hostname))) => {
+                    report.devices[index].hostname = Some(hostname);
+                    rows.push(report.devices[index].clone());
+                }
+                Ok(None) => {}
+                Err(error) => {
                     first_error.get_or_insert(error);
                 }
             }
             done += 1;
             if done % PROGRESS_BATCH == 0 || done == total {
-                sender.send(Progress::NetBios { done, total }).await;
+                if !rows.is_empty() {
+                    sender.send(Update::Rows(std::mem::take(&mut rows))).await;
+                }
+                sender
+                    .send(Update::Progress(lookup.progress(done, total)))
+                    .await;
             }
         }
         if let Some(error) = first_error {
             report
                 .notices
-                .push(format!("Some NetBIOS lookups failed: {error}"));
+                .push(format!("Some {} lookups failed: {error}", lookup.label()));
         }
         report
     })
@@ -244,7 +321,7 @@ fn eligible(interface: &interfaces::Interface) -> Result<impl Iterator<Item = Ip
         .map(Ipv4Addr::from))
 }
 
-fn in_subnet(interface: &interfaces::Interface, address: Ipv4Addr) -> bool {
+pub(super) fn in_subnet(interface: &interfaces::Interface, address: Ipv4Addr) -> bool {
     let (first, last) = host_bounds(interface);
     address != interface.ip && (first..=last).contains(&u32::from(address))
 }

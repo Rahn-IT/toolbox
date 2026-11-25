@@ -1,12 +1,15 @@
-use std::net::Ipv4Addr;
+use std::{collections::BTreeMap, net::Ipv4Addr};
 
 use iced::{Element, Task, task::Handle};
 
 use crate::{Module, OpenedModule, action::Action, tab_manager::TabMessage};
 
+pub mod device_scan;
 pub mod interfaces;
 mod netbios;
 mod ping;
+mod ports;
+mod reverse_dns;
 mod scan;
 mod view;
 
@@ -16,23 +19,33 @@ use interfaces::Interface;
 pub enum Message {
     InterfacesLoaded(Result<Vec<Interface>, String>),
     SelectInterface(Interface),
+    FilterChanged(String),
     Rescan,
     Cancel,
-    ScanProgress(u64, scan::Progress),
+    ScanUpdate(u64, scan::Update),
     ScanFinished(u64, scan::Report),
-    SelectDevice(Ipv4Addr),
+    CheckPorts,
+    CancelPorts,
+    PortResult(u64, Ipv4Addr, u16, ports::Outcome),
+    PortsFinished(u64, Result<(), String>),
+    OpenDevice(Ipv4Addr),
 }
 
 pub struct State {
     interfaces: Result<Vec<Interface>, String>,
     loading_interfaces: Option<Handle>,
     interface: Option<Interface>,
+    filter: String,
     scan_request: u64,
     loading_scan: Option<Handle>,
     progress: scan::Progress,
     results: Option<scan::Report>,
     canceled: bool,
-    device: Option<Ipv4Addr>,
+    port_request: u64,
+    port_task: Option<Handle>,
+    port_completed: usize,
+    port_results: BTreeMap<Ipv4Addr, BTreeMap<u16, ports::Outcome>>,
+    port_notice: Option<String>,
 }
 
 impl State {
@@ -47,12 +60,17 @@ impl State {
             interfaces: Ok(Vec::new()),
             loading_interfaces: Some(handle.abort_on_drop()),
             interface: None,
+            filter: String::new(),
             scan_request: 0,
             loading_scan: None,
             progress: scan::Progress::Preparing,
             results: None,
             canceled: false,
-            device: None,
+            port_request: 0,
+            port_task: None,
+            port_completed: 0,
+            port_results: BTreeMap::new(),
+            port_notice: None,
         };
         (
             Module::NetworkDevices(state),
@@ -62,9 +80,22 @@ impl State {
 
     pub fn update(&mut self, message: Message) -> Action<Message> {
         match message {
+            Message::FilterChanged(filter) => self.filter = filter,
+            Message::OpenDevice(ip)
+                if self
+                    .results
+                    .as_ref()
+                    .is_some_and(|report| report.devices.iter().any(|device| device.ip == ip)) =>
+            {
+                return Action::OpenModule(device_scan::State::new(ip));
+            }
             Message::InterfacesLoaded(result) => {
                 self.loading_interfaces = None;
                 self.interfaces = result;
+                if let Ok([interface]) = self.interfaces.as_deref() {
+                    self.interface = Some(interface.clone());
+                    return self.start_scan();
+                }
             }
             Message::SelectInterface(interface)
                 if self
@@ -74,7 +105,6 @@ impl State {
             {
                 self.interface = Some(interface);
                 self.results = None;
-                self.device = None;
                 return self.start_scan();
             }
             Message::Rescan if self.loading_scan.is_none() => return self.start_scan(),
@@ -83,25 +113,55 @@ impl State {
                 self.loading_scan = None;
                 self.canceled = true;
             }
-            Message::ScanProgress(request, progress)
+            Message::ScanUpdate(request, update)
                 if request == self.scan_request && self.loading_scan.is_some() =>
             {
-                self.progress = progress;
+                match update {
+                    scan::Update::Progress(progress) => self.progress = progress,
+                    scan::Update::Rows(rows) => {
+                        let devices = &mut self.results.get_or_insert_default().devices;
+                        for row in rows {
+                            match devices.binary_search_by_key(&row.ip, |device| device.ip) {
+                                Ok(index) => devices[index] = row,
+                                Err(index) => devices.insert(index, row),
+                            }
+                        }
+                    }
+                }
             }
             Message::ScanFinished(request, result) if request == self.scan_request => {
                 self.loading_scan = None;
-                self.device = self
-                    .device
-                    .filter(|ip| result.devices.iter().any(|row| row.ip == *ip));
                 self.results = Some(result);
+                return Action::Task(Task::done(Message::CheckPorts));
             }
-            Message::SelectDevice(ip)
-                if self
-                    .results
-                    .as_ref()
-                    .is_some_and(|report| report.devices.iter().any(|row| row.ip == ip)) =>
+            Message::CheckPorts if self.loading_scan.is_none() && self.port_task.is_none() => {
+                return self.check_ports();
+            }
+            Message::CancelPorts if self.port_task.is_some() => {
+                self.port_task = None;
+                self.port_notice = Some("Port checks canceled.".into());
+            }
+            Message::PortResult(request, ip, port, outcome)
+                if request == self.port_request && self.port_task.is_some() =>
             {
-                self.device = Some(ip);
+                if self
+                    .port_results
+                    .entry(ip)
+                    .or_default()
+                    .insert(port, outcome)
+                    .is_none()
+                {
+                    self.port_completed += 1;
+                }
+            }
+            Message::PortsFinished(request, result)
+                if request == self.port_request && self.port_task.is_some() =>
+            {
+                self.port_task = None;
+                self.port_notice = Some(match result {
+                    Ok(()) => "Port checks complete.".into(),
+                    Err(error) => format!("Could not check ports: {error}"),
+                });
             }
             _ => {}
         }
@@ -113,16 +173,47 @@ impl State {
             return Action::None;
         };
         self.scan_request += 1;
+        self.port_task = None;
+        self.port_results.clear();
+        self.port_notice = None;
+        self.results = None;
         self.canceled = false;
         self.progress = scan::Progress::Preparing;
         let request = self.scan_request;
         let (task, handle) = Task::sip(
             scan::discover(interface),
-            move |progress| Message::ScanProgress(request, progress),
+            move |update| Message::ScanUpdate(request, update),
             move |result| Message::ScanFinished(request, result),
         )
         .abortable();
         self.loading_scan = Some(handle.abort_on_drop());
+        Action::Task(task)
+    }
+
+    fn check_ports(&mut self) -> Action<Message> {
+        let (Some(interface), Some(report)) = (&self.interface, &self.results) else {
+            return Action::None;
+        };
+        if report.devices.is_empty() {
+            return Action::None;
+        }
+        if report.devices.len() > scan::MAX_HOSTS as usize {
+            self.port_notice = Some("This list exceeds the device limit for port checks.".into());
+            return Action::None;
+        }
+        self.port_request += 1;
+        let request = self.port_request;
+        self.port_completed = 0;
+        self.port_results.clear();
+        self.port_notice = None;
+        let addresses = report.devices.iter().map(|device| device.ip).collect();
+        let (task, handle) = Task::sip(
+            ports::check(interface.clone(), addresses),
+            move |(ip, port, outcome)| Message::PortResult(request, ip, port, outcome),
+            move |result| Message::PortsFinished(request, result),
+        )
+        .abortable();
+        self.port_task = Some(handle.abort_on_drop());
         Action::Task(task)
     }
 

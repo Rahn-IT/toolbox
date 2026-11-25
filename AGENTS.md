@@ -246,6 +246,8 @@ Do not add comments that merely restate the code.
 
 Update user-facing or developer-facing documentation when the requested change makes existing documentation materially inaccurate.
 
+Only modify `README.md` when the user explicitly requests a README change.
+
 ## 14. AGENTS.md changes
 
 Do not silently modify the rules in this file.

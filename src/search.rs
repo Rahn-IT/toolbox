@@ -5,7 +5,7 @@ use iced::{
 };
 
 use crate::{
-    OpenedModule,
+    OpenedModule, device_scan,
     encoder::{Encoder, Encoding},
     mailbox_scanner, network_scanner, nut, path_length_checker, wake_on_lan,
 };
@@ -90,6 +90,7 @@ pub enum Message {
     NextResult,
     Submit,
     Open(usize),
+    OpenDevice(Ipv4Addr),
 }
 
 #[derive(Default)]
@@ -126,24 +127,29 @@ impl State {
             Message::PreviousResult => {
                 *selected_result = match *selected_result {
                     Some(index) => Some(index.saturating_sub(1)),
-                    None => available_tools(query).count().checked_sub(1),
+                    None => available_results(query).count().checked_sub(1),
                 };
                 None
             }
             Message::NextResult => {
-                if let Some(last) = available_tools(query).count().checked_sub(1) {
+                if let Some(last) = available_results(query).count().checked_sub(1) {
                     *selected_result =
                         Some(selected_result.map_or(0, |index| (index + 1).min(last)));
                 }
                 None
             }
-            Message::Submit => available_tools(query)
-                .nth(selected_result.unwrap_or(0))
-                .map(|(_, tool)| (tool.open)()),
+            Message::Submit => {
+                let result = available_results(query).nth(selected_result.unwrap_or(0))?;
+                Self::update_query(query, selected_result, result)
+            }
             Message::Open(index) => TOOLS
                 .get(index)
                 .filter(|tool| tool.is_available())
                 .map(|tool| (tool.open)()),
+            Message::OpenDevice(ip) if device_address(query) == Some(ip) => {
+                Some(device_scan::State::new(ip))
+            }
+            Message::OpenDevice(_) => None,
         }
     }
 
@@ -155,6 +161,18 @@ impl State {
         let mut results = column![].spacing(2).width(Length::Fill);
         let mut has_results = false;
         let mut position = 0;
+        if let Some(ip) = device_address(value) {
+            let selected = selected_result == Some(0);
+            results = results.push(
+                button(text(format!("Scan device {ip}")).size(16))
+                    .width(Length::Fill)
+                    .padding([8, 16])
+                    .style(move |theme, status| result_style(theme, status, selected))
+                    .on_press(Message::OpenDevice(ip)),
+            );
+            has_results = true;
+            position = 1;
+        }
         for (index, tool) in matching_tools(value) {
             let available = tool.is_available();
             let selected = available && selected_result == Some(position);
@@ -218,8 +236,19 @@ impl State {
     }
 }
 
-fn available_tools(query: &str) -> impl Iterator<Item = (usize, &'static Tool)> {
-    matching_tools(query).filter(|(_, tool)| tool.is_available())
+fn device_address(query: &str) -> Option<Ipv4Addr> {
+    query.trim().parse().ok()
+}
+
+fn available_results(query: &str) -> impl Iterator<Item = Message> {
+    device_address(query)
+        .map(Message::OpenDevice)
+        .into_iter()
+        .chain(
+            matching_tools(query)
+                .filter(|(_, tool)| tool.is_available())
+                .map(|(index, _)| Message::Open(index)),
+        )
 }
 
 fn matching_tools(query: &str) -> impl Iterator<Item = (usize, &'static Tool)> {
@@ -238,6 +267,26 @@ fn result_style(theme: &Theme, status: button::Status, selected: bool) -> button
     };
     style.border.radius = 6.0.into();
     style
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entering_an_ipv4_address_opens_a_device_scan_as_the_first_result() {
+        let mut search = State::new("192.0.2.".into());
+        assert!(search.update(Message::Submit).is_none());
+        assert!(
+            search
+                .update(Message::QueryChanged("192.0.2.10".into()))
+                .is_none()
+        );
+        let Some((crate::Module::DeviceScan(device), _)) = search.update(Message::Submit) else {
+            panic!("expected Device Scan as the first result");
+        };
+        assert_eq!(device.title(), "192.0.2.10");
+    }
 }
 
 struct SearchIcon;
@@ -305,3 +354,4 @@ impl Widget<Message, Theme, iced::Renderer> for SearchIcon {
         }
     }
 }
+use std::net::Ipv4Addr;

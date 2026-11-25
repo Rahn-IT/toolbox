@@ -8,8 +8,8 @@ use iced::{
 
 use crate::action::Action;
 use crate::{
-    Module, encoder, mailbox_scanner, network_scanner, nut, path_length_checker, search,
-    wake_on_lan,
+    Module, device_scan, encoder, mailbox_scanner, network_scanner, nut, path_length_checker,
+    search, wake_on_lan,
 };
 #[cfg(windows)]
 use crate::{quick_install, quick_tools};
@@ -32,6 +32,7 @@ pub enum TabMessage {
     Nut(nut::Message),
     WakeOnLan(wake_on_lan::Message),
     NetworkDevices(network_scanner::Message),
+    DeviceScan(device_scan::Message),
     MailboxScanner(mailbox_scanner::Message),
     #[cfg(windows)]
     QuickInstall(quick_install::Message),
@@ -204,11 +205,12 @@ impl TabManager {
         self.selected_result = None;
     }
 
-    fn open_tab(&mut self, module: Module) {
+    fn open_tab(&mut self, module: Module) -> usize {
         let index = self.next_tab;
         self.next_tab += 1;
         self.tabs.insert(index, module);
         self.select_tab(index);
+        index
     }
 
     fn close_tab(&mut self, index: usize) {
@@ -279,6 +281,9 @@ impl TabManager {
             (Module::NetworkDevices(state), TabMessage::NetworkDevices(message)) => {
                 state.update(message).map(TabMessage::NetworkDevices)
             }
+            (Module::DeviceScan(state), TabMessage::DeviceScan(message)) => {
+                state.update(message).map(TabMessage::DeviceScan)
+            }
             (Module::MailboxScanner(state), TabMessage::MailboxScanner(message)) => {
                 state.update(message).map(TabMessage::MailboxScanner)
             }
@@ -309,6 +314,10 @@ impl TabManager {
                 Task::none()
             }
             Action::Task(task) => task.map(move |message| Message::Tab(index, message)),
+            Action::OpenModule((module, task)) => {
+                let new_tab = self.open_tab(module);
+                task.map(move |message| Message::Tab(new_tab, message))
+            }
             Action::Close if self.window_close_tab == Some(index) => {
                 self.window_close_tab = None;
                 if let Some(Module::MailboxScanner(state)) = self.tabs.get_mut(&index) {
@@ -378,7 +387,7 @@ impl Module {
         }
     }
 
-    pub fn title(&self) -> &'static str {
+    pub fn title(&self) -> &str {
         match self {
             Self::Search(_) => search::State::TITLE,
             Self::Encoder(state) => state.title(),
@@ -386,6 +395,7 @@ impl Module {
             Self::Nut(_) => nut::Nut::TITLE,
             Self::WakeOnLan(_) => wake_on_lan::State::TITLE,
             Self::NetworkDevices(_) => network_scanner::State::TITLE,
+            Self::DeviceScan(state) => state.title(),
             Self::MailboxScanner(_) => mailbox_scanner::App::TITLE,
             #[cfg(windows)]
             Self::QuickInstall(_) => quick_install::QuickInstall::TITLE,
@@ -404,6 +414,7 @@ impl Module {
             Self::Nut(state) => state.view().map(TabMessage::Nut),
             Self::WakeOnLan(state) => state.view().map(TabMessage::WakeOnLan),
             Self::NetworkDevices(state) => state.view().map(TabMessage::NetworkDevices),
+            Self::DeviceScan(state) => state.view().map(TabMessage::DeviceScan),
             Self::MailboxScanner(state) => state.view().map(TabMessage::MailboxScanner),
             #[cfg(windows)]
             Self::QuickInstall(state) => state.view().map(TabMessage::QuickInstall),
