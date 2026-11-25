@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-pub(super) fn executable(relative: &str) -> Result<PathBuf, String> {
+pub(crate) fn executable(relative: &str) -> Result<PathBuf, String> {
     let windows = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())

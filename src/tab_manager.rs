@@ -7,7 +7,7 @@ use iced::{
 };
 
 use crate::action::Action;
-use crate::{Module, encoder, mailbox_scanner, nut, path_length_checker, search};
+use crate::{Module, encoder, mailbox_scanner, nut, path_length_checker, search, wake_on_lan};
 #[cfg(windows)]
 use crate::{quick_install, quick_tools};
 
@@ -27,11 +27,12 @@ pub enum TabMessage {
     Encoder(encoder::Message),
     PathLengthChecker(path_length_checker::Message),
     Nut(nut::Message),
+    WakeOnLan(wake_on_lan::Message),
     MailboxScanner(mailbox_scanner::Message),
     #[cfg(windows)]
     QuickInstall(quick_install::Message),
     #[cfg(windows)]
-    QuickTools(quick_tools::Message),
+    QuickTool(quick_tools::Message),
 }
 
 /// Owns the open modules and tracks the selected tab.
@@ -66,7 +67,7 @@ impl TabManager {
                     #[cfg(windows)]
                     Module::QuickInstall(state) => state.close().map(TabMessage::QuickInstall),
                     #[cfg(windows)]
-                    Module::QuickTools(state) => state.close().map(TabMessage::QuickTools),
+                    Module::QuickTool(state) => state.close().map(TabMessage::QuickTool),
                     _ => Action::Close,
                 };
                 self.apply_action(index, action)
@@ -89,7 +90,7 @@ impl TabManager {
     pub fn view(&self) -> Element<'_, Message> {
         let tabs = row(self.tabs.iter().map(|(&index, module)| {
             let selected = index == self.selected_tab;
-            let title = module.tab_title();
+            let title = module.title();
             let label = module
                 .close_status()
                 .map_or_else(|| title.to_owned(), |status| format!("{title} · {status}"));
@@ -250,23 +251,26 @@ impl TabManager {
         let action = match (module, message) {
             (module, TabMessage::Search(message)) if index == self.selected_tab => {
                 if let Module::Search(query) = module
-                    && let Some(opened) =
+                    && let Some((opened, task)) =
                         search::State::update_query(query, &mut self.selected_result, message)
                 {
                     *module = opened;
                     self.selected_result = None;
+                    return self.apply_action(index, Action::Task(task));
                 }
                 Action::None
             }
-            (
-                Module::Eml(state) | Module::Base64(state) | Module::Unicode(state),
-                TabMessage::Encoder(message),
-            ) => state.update(message).map(TabMessage::Encoder),
+            (Module::Encoder(state), TabMessage::Encoder(message)) => {
+                state.update(message).map(TabMessage::Encoder)
+            }
             (Module::PathLengthChecker(state), TabMessage::PathLengthChecker(message)) => {
                 state.update(message).map(TabMessage::PathLengthChecker)
             }
             (Module::Nut(state), TabMessage::Nut(message)) => {
                 state.update(message).map(TabMessage::Nut)
+            }
+            (Module::WakeOnLan(state), TabMessage::WakeOnLan(message)) => {
+                state.update(message).map(TabMessage::WakeOnLan)
             }
             (Module::MailboxScanner(state), TabMessage::MailboxScanner(message)) => {
                 state.update(message).map(TabMessage::MailboxScanner)
@@ -276,8 +280,8 @@ impl TabManager {
                 state.update(message).map(TabMessage::QuickInstall)
             }
             #[cfg(windows)]
-            (Module::QuickTools(state), TabMessage::QuickTools(message)) => {
-                state.update(message).map(TabMessage::QuickTools)
+            (Module::QuickTool(state), TabMessage::QuickTool(message)) => {
+                state.update(message).map(TabMessage::QuickTool)
             }
             _ => Action::None,
         };
@@ -362,24 +366,23 @@ impl Module {
             #[cfg(windows)]
             Self::QuickInstall(state) if state.is_closing() => Some("Closing…"),
             #[cfg(windows)]
-            Self::QuickTools(state) if state.is_closing() => Some("Closing…"),
+            Self::QuickTool(state) if state.is_closing() => Some("Closing…"),
             _ => None,
         }
     }
 
-    fn tab_title(&self) -> &'static str {
+    pub fn title(&self) -> &'static str {
         match self {
-            Self::Search(_) => "Search",
-            Self::Eml(_) => "EML Encode",
-            Self::Base64(_) => "Base64 Encode",
-            Self::Unicode(_) => "Unicode Encode",
-            Self::PathLengthChecker(_) => "Path Length Checker",
-            Self::Nut(_) => "NUT Client",
-            Self::MailboxScanner(_) => "Mailbox Scanner",
+            Self::Search(_) => search::State::TITLE,
+            Self::Encoder(state) => state.title(),
+            Self::PathLengthChecker(_) => path_length_checker::PathLengthChecker::TITLE,
+            Self::Nut(_) => nut::Nut::TITLE,
+            Self::WakeOnLan(_) => wake_on_lan::State::TITLE,
+            Self::MailboxScanner(_) => mailbox_scanner::App::TITLE,
             #[cfg(windows)]
-            Self::QuickInstall(_) => "Quick Install",
+            Self::QuickInstall(_) => quick_install::QuickInstall::TITLE,
             #[cfg(windows)]
-            Self::QuickTools(_) => "Quick Tools",
+            Self::QuickTool(state) => state.title(),
         }
     }
 
@@ -388,18 +391,15 @@ impl Module {
             Self::Search(query) => {
                 search::State::view_query(query, selected_result).map(TabMessage::Search)
             }
-            Self::Eml(state) => state
-                .view("Encoder for quoted printable encoding in EML files")
-                .map(TabMessage::Encoder),
-            Self::Base64(state) => state.view("Base 64 Encoder").map(TabMessage::Encoder),
-            Self::Unicode(state) => state.view("Unicode Encoder").map(TabMessage::Encoder),
+            Self::Encoder(state) => state.view().map(TabMessage::Encoder),
             Self::PathLengthChecker(state) => state.view().map(TabMessage::PathLengthChecker),
             Self::Nut(state) => state.view().map(TabMessage::Nut),
+            Self::WakeOnLan(state) => state.view().map(TabMessage::WakeOnLan),
             Self::MailboxScanner(state) => state.view().map(TabMessage::MailboxScanner),
             #[cfg(windows)]
             Self::QuickInstall(state) => state.view().map(TabMessage::QuickInstall),
             #[cfg(windows)]
-            Self::QuickTools(state) => state.view().map(TabMessage::QuickTools),
+            Self::QuickTool(state) => state.view().map(TabMessage::QuickTool),
         }
     }
 }

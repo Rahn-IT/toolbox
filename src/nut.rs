@@ -19,11 +19,14 @@ pub struct Nut {
 }
 
 impl Nut {
-    pub fn new() -> Self {
-        Self {
+    pub const TITLE: &'static str = "NUT Client";
+
+    pub fn new() -> crate::OpenedModule {
+        let state = Self {
             connect: connect::Connect::new(),
             monitor: None,
-        }
+        };
+        (crate::Module::Nut(state), iced::Task::none())
     }
 
     pub fn update(&mut self, message: Message) -> Action<Message> {

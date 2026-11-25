@@ -5,6 +5,13 @@ use iced::{Font, alignment::Vertical};
 fn main() -> Result<(), iced::Error> {
     use tab_manager::TabManager;
 
+    #[cfg(windows)]
+    match windows_admin::relaunch_if_needed() {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => eprintln!("Could not restart as administrator: {error}"),
+    }
+
     iced::application(TabManager::default, TabManager::update, TabManager::view)
         .title("Rahn-IT Toolbox")
         .window(iced::window::Settings {
@@ -29,6 +36,9 @@ pub mod quick_install;
 pub mod quick_tools;
 pub mod search;
 pub mod tab_manager;
+pub mod wake_on_lan;
+#[cfg(windows)]
+mod windows_admin;
 
 /// State for a module in the redesigned interface.
 pub enum Module {
@@ -36,13 +46,24 @@ pub enum Module {
     #[cfg(windows)]
     QuickInstall(quick_install::QuickInstall),
     #[cfg(windows)]
-    QuickTools(quick_tools::State),
-    Eml(encoder::Encoder),
-    Base64(encoder::Encoder),
-    Unicode(encoder::Encoder),
+    QuickTool(quick_tools::State),
+    Encoder(encoder::Encoder),
     PathLengthChecker(path_length_checker::PathLengthChecker),
     Nut(nut::Nut),
+    WakeOnLan(wake_on_lan::State),
     MailboxScanner(mailbox_scanner::App),
+}
+
+pub type OpenedModule = (Module, iced::Task<tab_manager::TabMessage>);
+
+fn rounded_input_style(
+    theme: &iced::Theme,
+    status: iced::widget::text_input::Status,
+) -> iced::widget::text_input::Style {
+    let mut style = iced::widget::text_input::default(theme, status);
+    style.background = theme.extended_palette().background.weak.color.into();
+    style.border.radius = 14.0.into();
+    style
 }
 
 #[derive(Clone, Debug)]

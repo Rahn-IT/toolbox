@@ -36,6 +36,12 @@ pub enum Message {
 }
 
 impl App {
+    pub const TITLE: &'static str = "Mailbox Scanner";
+
+    pub fn new() -> crate::OpenedModule {
+        (crate::Module::MailboxScanner(Self::default()), Task::none())
+    }
+
     pub fn is_closing(&self) -> bool {
         self.scan.as_ref().is_some_and(|state| state.is_closing())
     }

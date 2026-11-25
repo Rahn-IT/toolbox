@@ -4,7 +4,13 @@ use std::{fs, os::windows::process::CommandExt, path::Path, process::Command, ti
 
 const URL: &str = "https://adwcleaner.malwarebytes.com/adwcleaner?channel=release";
 
-pub(super) fn run() -> Result<String, String> {
+pub const TITLE: &str = "Run AdwCleaner";
+
+pub fn new() -> crate::OpenedModule {
+    super::start(TITLE, run)
+}
+
+fn run() -> Result<String, String> {
     let nonce = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map_err(|error| error.to_string())?

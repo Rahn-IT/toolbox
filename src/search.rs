@@ -1,60 +1,85 @@
-use base64::{Engine, prelude::BASE64_STANDARD};
 use iced::{
     Border, Color, Element, Length, Padding, Rectangle, Size, Theme,
     advanced::{Layout, Widget, layout, mouse, renderer, widget::Tree},
-    widget::{button, column, container, scrollable, stack, text, text_input},
+    widget::{button, column, container, row, scrollable, space, stack, text, text_input},
 };
 
-use crate::{Module, eml, encoder, mailbox_scanner, nut, path_length_checker};
+use crate::{
+    OpenedModule,
+    encoder::{Encoder, Encoding},
+    mailbox_scanner, nut, path_length_checker, wake_on_lan,
+};
+#[cfg(windows)]
+use crate::{
+    quick_install::QuickInstall,
+    quick_tools::{
+        adwcleaner, clear_default_extensions, disable_hibernation, set_power_config, temp_files,
+    },
+};
 
 pub(crate) const INPUT_ID: &str = "tool-search";
 
-const TOOLS: &[(&str, fn() -> Module)] = &[
+struct Tool {
+    title: &'static str,
+    open: fn() -> OpenedModule,
+    requires_admin: bool,
+}
+
+impl Tool {
+    const fn new(title: &'static str, open: fn() -> OpenedModule) -> Self {
+        Self {
+            title,
+            open,
+            requires_admin: false,
+        }
+    }
+
     #[cfg(windows)]
-    ("Quick Install", || {
-        Module::QuickInstall(crate::quick_install::QuickInstall::new())
-    }),
+    const fn admin_only(mut self) -> Self {
+        self.requires_admin = true;
+        self
+    }
+
+    fn is_available(&self) -> bool {
+        if self.requires_admin {
+            #[cfg(windows)]
+            return crate::windows_admin::is_elevated();
+            #[cfg(not(windows))]
+            return false;
+        }
+        true
+    }
+}
+
+const TOOLS: &[Tool] = &[
     #[cfg(windows)]
-    ("Quick Tools", || {
-        Module::QuickTools(crate::quick_tools::State::default())
+    Tool::new(QuickInstall::TITLE, QuickInstall::new),
+    Tool::new(Encoding::Eml.title(), || Encoder::new(Encoding::Eml)),
+    Tool::new(Encoding::Base64.title(), || Encoder::new(Encoding::Base64)),
+    Tool::new(Encoding::Unicode.title(), || {
+        Encoder::new(Encoding::Unicode)
     }),
-    ("EML Encode", || {
-        Module::Eml(encoder::Encoder::new(eml::qp_encode, eml::qp_decode))
-    }),
-    ("Base64 Encode", || {
-        Module::Base64(encoder::Encoder::new(
-            |raw| BASE64_STANDARD.encode(raw),
-            |encoded| {
-                BASE64_STANDARD
-                    .decode(encoded)
-                    .map(|decoded| String::from_utf8_lossy(&decoded).into_owned())
-                    .unwrap_or_else(|err| err.to_string())
-            },
-        ))
-    }),
-    ("Unicode Encode", || {
-        Module::Unicode(encoder::Encoder::new(
-            |raw| {
-                raw.chars()
-                    .map(|character| (character as u32).to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            },
-            |encoded| {
-                encoded
-                    .split_ascii_whitespace()
-                    .filter_map(|number| char::from_u32(number.parse().ok()?))
-                    .collect()
-            },
-        ))
-    }),
-    ("Path Length Checker", || {
-        Module::PathLengthChecker(path_length_checker::PathLengthChecker::new())
-    }),
-    ("NUT Client", || Module::Nut(nut::Nut::new())),
-    ("Mailbox Scanner", || {
-        Module::MailboxScanner(mailbox_scanner::App::default())
-    }),
+    Tool::new(
+        path_length_checker::PathLengthChecker::TITLE,
+        path_length_checker::PathLengthChecker::new,
+    ),
+    Tool::new(nut::Nut::TITLE, nut::Nut::new),
+    Tool::new(wake_on_lan::State::TITLE, wake_on_lan::State::new),
+    Tool::new(mailbox_scanner::App::TITLE, mailbox_scanner::App::new),
+    #[cfg(windows)]
+    Tool::new(adwcleaner::TITLE, adwcleaner::new),
+    #[cfg(windows)]
+    Tool::new(
+        clear_default_extensions::TITLE,
+        clear_default_extensions::new,
+    )
+    .admin_only(),
+    #[cfg(windows)]
+    Tool::new(disable_hibernation::TITLE, disable_hibernation::new).admin_only(),
+    #[cfg(windows)]
+    Tool::new(set_power_config::TITLE, set_power_config::new),
+    #[cfg(windows)]
+    Tool::new(temp_files::TITLE, temp_files::new),
 ];
 
 #[derive(Clone)]
@@ -73,6 +98,8 @@ pub struct State {
 }
 
 impl State {
+    pub const TITLE: &'static str = "Search";
+
     pub fn new(query: String) -> Self {
         Self {
             query,
@@ -80,7 +107,7 @@ impl State {
         }
     }
 
-    pub fn update(&mut self, message: Message) -> Option<Module> {
+    pub fn update(&mut self, message: Message) -> Option<OpenedModule> {
         Self::update_query(&mut self.query, &mut self.selected_result, message)
     }
 
@@ -88,7 +115,7 @@ impl State {
         query: &mut String,
         selected_result: &mut Option<usize>,
         message: Message,
-    ) -> Option<Module> {
+    ) -> Option<OpenedModule> {
         match message {
             Message::QueryChanged(value) => {
                 *query = value;
@@ -98,21 +125,24 @@ impl State {
             Message::PreviousResult => {
                 *selected_result = match *selected_result {
                     Some(index) => Some(index.saturating_sub(1)),
-                    None => matching_tools(query).count().checked_sub(1),
+                    None => available_tools(query).count().checked_sub(1),
                 };
                 None
             }
             Message::NextResult => {
-                if let Some(last) = matching_tools(query).count().checked_sub(1) {
+                if let Some(last) = available_tools(query).count().checked_sub(1) {
                     *selected_result =
                         Some(selected_result.map_or(0, |index| (index + 1).min(last)));
                 }
                 None
             }
-            Message::Submit => matching_tools(query)
+            Message::Submit => available_tools(query)
                 .nth(selected_result.unwrap_or(0))
-                .map(|(index, _)| (TOOLS[index].1)()),
-            Message::Open(index) => TOOLS.get(index).map(|(_, open)| open()),
+                .map(|(_, tool)| (tool.open)()),
+            Message::Open(index) => TOOLS
+                .get(index)
+                .filter(|tool| tool.is_available())
+                .map(|tool| (tool.open)()),
         }
     }
 
@@ -123,14 +153,31 @@ impl State {
     pub(crate) fn view_query(value: &str, selected_result: Option<usize>) -> Element<'_, Message> {
         let mut results = column![].spacing(2).width(Length::Fill);
         let mut has_results = false;
-        for (position, (index, name)) in matching_tools(value).enumerate() {
-            let selected = selected_result == Some(position);
+        let mut position = 0;
+        for (index, tool) in matching_tools(value) {
+            let available = tool.is_available();
+            let selected = available && selected_result == Some(position);
+            let mut label = row![text(tool.title).size(16)].spacing(12);
+            if available {
+                position += 1;
+            } else {
+                label =
+                    label
+                        .push(space::horizontal())
+                        .push(
+                            text("Admin Required")
+                                .size(13)
+                                .style(|theme: &Theme| text::Style {
+                                    color: Some(theme.extended_palette().danger.base.color),
+                                }),
+                        );
+            }
             results = results.push(
-                button(text(name).size(16))
+                button(label.align_y(iced::Alignment::Center))
                     .width(Length::Fill)
-                    .padding([12, 16])
+                    .padding([8, 16])
                     .style(move |theme, status| result_style(theme, status, selected))
-                    .on_press(Message::Open(index)),
+                    .on_press_maybe(available.then_some(Message::Open(index))),
             );
             has_results = true;
         }
@@ -148,12 +195,7 @@ impl State {
                 bottom: 16.0,
                 left: 46.0,
             })
-            .style(|theme, status| {
-                let mut style = text_input::default(theme, status);
-                style.background = theme.extended_palette().background.weak.color.into();
-                style.border.radius = 14.0.into();
-                style
-            });
+            .style(crate::rounded_input_style);
         let search_field = stack![
             input,
             container(Element::new(SearchIcon))
@@ -175,16 +217,16 @@ impl State {
     }
 }
 
-fn matching_tools(query: &str) -> impl Iterator<Item = (usize, &'static str)> {
+fn available_tools(query: &str) -> impl Iterator<Item = (usize, &'static Tool)> {
+    matching_tools(query).filter(|(_, tool)| tool.is_available())
+}
+
+fn matching_tools(query: &str) -> impl Iterator<Item = (usize, &'static Tool)> {
     let query = query.trim().to_ascii_lowercase();
     TOOLS
         .iter()
         .enumerate()
-        .filter_map(move |(index, (name, _))| {
-            name.to_ascii_lowercase()
-                .contains(&query)
-                .then_some((index, *name))
-        })
+        .filter(move |(_, tool)| tool.title.to_ascii_lowercase().contains(&query))
 }
 
 fn result_style(theme: &Theme, status: button::Status, selected: bool) -> button::Style {

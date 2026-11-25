@@ -22,7 +22,13 @@ const LOCATIONS: &[&str] = &[
     r"HKCU\SOFTWARE\Policies\Microsoft\Edge",
 ];
 
-pub(super) fn run() -> Result<String, String> {
+pub const TITLE: &str = "Clear Browser Default Extensions and Policies";
+
+pub fn new() -> crate::OpenedModule {
+    super::start(TITLE, run)
+}
+
+fn run() -> Result<String, String> {
     let executable = super::system::executable("reg.exe")?;
     let report = clear_with(|location| {
         // Windows supplies reg.exe; no shell or additional runtime is needed.

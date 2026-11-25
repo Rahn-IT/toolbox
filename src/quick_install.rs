@@ -72,13 +72,16 @@ pub struct Installing {
 }
 
 impl QuickInstall {
-    pub fn new() -> Self {
-        Self::Selection(Selection {
+    pub const TITLE: &'static str = "Quick Install";
+
+    pub fn new() -> crate::OpenedModule {
+        let state = Self::Selection(Selection {
             install_selection: InstallSelection::default(),
             filter: String::new(),
             status_message: None,
             install_success: false,
-        })
+        });
+        (crate::Module::QuickInstall(state), Task::none())
     }
 
     pub fn is_closing(&self) -> bool {

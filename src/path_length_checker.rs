@@ -90,8 +90,10 @@ pub struct OverLimit {
 }
 
 impl PathLengthChecker {
-    pub fn new() -> Self {
-        Self {
+    pub const TITLE: &'static str = "Path Length Checker";
+
+    pub fn new() -> crate::OpenedModule {
+        let state = Self {
             selecting: false,
             selected: None,
             scan_status: ScanStatus::WaitingForStart,
@@ -105,7 +107,8 @@ impl PathLengthChecker {
             closing: false,
             export_message: None,
             export_success: false,
-        }
+        };
+        (crate::Module::PathLengthChecker(state), Task::none())
     }
 
     pub fn is_closing(&self) -> bool {
