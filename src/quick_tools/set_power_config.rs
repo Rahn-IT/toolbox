@@ -9,7 +9,13 @@ const SETTINGS: &[(&str, &str)] = &[
     ("-standby-timeout-ac", "0"),
 ];
 
-pub(super) fn run() -> Result<String, String> {
+pub const TITLE: &str = "Set Power Config";
+
+pub fn new() -> crate::OpenedModule {
+    super::start(TITLE, run)
+}
+
+fn run() -> Result<String, String> {
     apply_with(|setting, minutes| {
         let output = Command::new(super::system::executable("powercfg.exe")?)
             .args(["-Change", setting, minutes])

@@ -2,7 +2,13 @@
 
 use std::{os::windows::process::CommandExt, process::Command};
 
-pub(super) fn run() -> Result<String, String> {
+pub const TITLE: &str = "Disable Hibernation";
+
+pub fn new() -> crate::OpenedModule {
+    super::start(TITLE, run)
+}
+
+fn run() -> Result<String, String> {
     let output = Command::new(super::system::executable("powercfg.exe")?)
         .args(["-h", "off"])
         .creation_flags(0x08000000) // CREATE_NO_WINDOW

@@ -246,10 +246,7 @@ impl State {
             Message::ConfirmClose if !self.busy() => {
                 return Action::instruction(Instruction::Close);
             }
-            Message::Stay => {
-                self.closing = false;
-                self.close_review = false;
-            }
+            Message::Stay => self.clear_close_request(),
             Message::Worker { .. }
             | Message::RunnerDone { .. }
             | Message::StreamClosed(_)
@@ -283,6 +280,15 @@ impl State {
 
     pub fn is_closing(&self) -> bool {
         self.closing
+    }
+
+    pub(super) fn is_reviewing_close(&self) -> bool {
+        self.close_review
+    }
+
+    pub(super) fn clear_close_request(&mut self) {
+        self.closing = false;
+        self.close_review = false;
     }
 
     #[cfg(test)]

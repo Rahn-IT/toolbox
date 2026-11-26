@@ -32,6 +32,7 @@ pub struct Connect {
     password: String,
     show_password: bool,
     connecting: bool,
+    pending_connect: Option<iced::task::Handle>,
     error: Option<String>,
 }
 
@@ -44,6 +45,7 @@ impl Connect {
             password: String::new(),
             show_password: false,
             connecting: false,
+            pending_connect: None,
             error: None,
         }
     }
@@ -65,15 +67,17 @@ impl Connect {
                 self.error = None;
                 self.connecting = true;
 
-                return Action::Run(
-                    Task::future(async move {
-                        Arc::new(NutClient::connect(host, port, username, password).await)
-                    })
-                    .map(Message::ConnectResult),
-                );
+                let (task, handle) = Task::future(async move {
+                    Arc::new(NutClient::connect(host, port, username, password).await)
+                })
+                .map(Message::ConnectResult)
+                .abortable();
+                self.pending_connect = Some(handle.abort_on_drop());
+                return Action::Run(task);
             }
             Message::ConnectResult(result) => {
                 self.connecting = false;
+                self.pending_connect = None;
                 let result = Arc::try_unwrap(result).unwrap();
                 match result {
                     Ok(client) => {

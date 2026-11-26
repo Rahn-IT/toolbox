@@ -8,7 +8,13 @@ use std::{
 
 const MIN_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-pub(super) fn run() -> Result<String, String> {
+pub const TITLE: &str = "Delete Old Temporary Files";
+
+pub fn new() -> crate::OpenedModule {
+    super::start(TITLE, run)
+}
+
+fn run() -> Result<String, String> {
     clean(&std::env::temp_dir(), SystemTime::now()).map_err(|error| error.to_string())
 }
 

@@ -233,8 +233,6 @@ Do not claim validation that was not actually performed.
 
 ## 13. Documentation and comments
 
-Do not edit `README.md`.
-
 Prefer code that is understandable without excessive commentary.
 
 Add comments where they explain:
@@ -247,6 +245,8 @@ Add comments where they explain:
 Do not add comments that merely restate the code.
 
 Update user-facing or developer-facing documentation when the requested change makes existing documentation materially inaccurate.
+
+Only modify `README.md` when the user explicitly requests a README change.
 
 ## 14. AGENTS.md changes
 
