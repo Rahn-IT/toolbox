@@ -13,7 +13,8 @@ use crate::{
 use crate::{
     quick_install::QuickInstall,
     quick_tools::{
-        adwcleaner, clear_default_extensions, disable_hibernation, set_power_config, temp_files,
+        adwcleaner, clear_default_extensions, restart_print_spooler, run_windows_command,
+        set_power_config, temp_files,
     },
 };
 
@@ -76,7 +77,26 @@ const TOOLS: &[Tool] = &[
     )
     .admin_only(),
     #[cfg(windows)]
-    Tool::new(disable_hibernation::TITLE, disable_hibernation::new).admin_only(),
+    Tool::new("Disable Hibernation", || {
+        run_windows_command::new(
+            "Disable Hibernation",
+            "powercfg.exe",
+            &["-h", "off"],
+            "Hibernation disabled (powercfg -h off).",
+        )
+    })
+    .admin_only(),
+    #[cfg(windows)]
+    Tool::new(restart_print_spooler::TITLE, restart_print_spooler::new).admin_only(),
+    #[cfg(windows)]
+    Tool::new("Flush DNS Cache", || {
+        run_windows_command::new(
+            "Flush DNS Cache",
+            "ipconfig.exe",
+            &["/flushdns"],
+            "DNS resolver cache flushed.",
+        )
+    }),
     #[cfg(windows)]
     Tool::new(set_power_config::TITLE, set_power_config::new),
     #[cfg(windows)]

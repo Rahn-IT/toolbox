@@ -2,7 +2,8 @@
 
 pub mod adwcleaner;
 pub mod clear_default_extensions;
-pub mod disable_hibernation;
+pub mod restart_print_spooler;
+pub mod run_windows_command;
 pub mod set_power_config;
 pub mod temp_files;
 
@@ -30,7 +31,10 @@ pub enum Message {
     Finished(Result<String, String>),
 }
 
-fn start(title: &'static str, run: fn() -> Result<String, String>) -> OpenedModule {
+fn start(
+    title: &'static str,
+    run: impl FnOnce() -> Result<String, String> + Send + 'static,
+) -> OpenedModule {
     let state = State {
         title,
         status: Status::Running { closing: false },

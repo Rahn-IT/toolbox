@@ -1,7 +1,5 @@
 //! Apply the requested display and sleep timeouts to the active Windows power plan.
 
-use std::{os::windows::process::CommandExt, process::Command};
-
 const SETTINGS: &[(&str, &str)] = &[
     ("-monitor-timeout-dc", "5"),
     ("-standby-timeout-dc", "15"),
@@ -17,25 +15,7 @@ pub fn new() -> crate::OpenedModule {
 
 fn run() -> Result<String, String> {
     apply_with(|setting, minutes| {
-        let output = Command::new(super::system::executable("powercfg.exe")?)
-            .args(["-Change", setting, minutes])
-            .creation_flags(0x08000000) // CREATE_NO_WINDOW
-            .output()
-            .map_err(|error| format!("Could not start powercfg.exe: {error}"))?;
-        if output.status.success() {
-            return Ok(());
-        }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let details = if stderr.trim().is_empty() {
-            stdout.trim()
-        } else {
-            stderr.trim()
-        };
-        Err(format!(
-            "powercfg.exe exited with {}: {details}",
-            output.status
-        ))
+        super::run_windows_command::run("powercfg.exe", &["-Change", setting, minutes])
     })
 }
 
