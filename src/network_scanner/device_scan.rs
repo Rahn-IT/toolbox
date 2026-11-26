@@ -218,7 +218,8 @@ impl State {
             .iter()
             .copied()
             .filter(|(port, outcome)| {
-                *outcome != ports::Outcome::TimedOut || self.manual_ports.contains(port)
+                !matches!(outcome, ports::Outcome::Refused | ports::Outcome::TimedOut)
+                    || self.manual_ports.contains(port)
             })
             .peekable();
         let port_rows = if visible_ports.peek().is_none() {

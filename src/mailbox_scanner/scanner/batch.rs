@@ -266,7 +266,7 @@ pub(crate) async fn scan(
             cleanup_safe: true,
         };
     }
-    let mut command = match &engine.settings {
+    let command = match &engine.settings {
         scanner::Settings::Avast(settings) => {
             avast::batch_command(&engine.executable, batch.directory(), settings)
         }
@@ -285,7 +285,11 @@ pub(crate) async fn scan(
         }
     };
     #[cfg(windows)]
-    command.creation_flags(0x0800_0000);
+    let command = {
+        let mut command = command;
+        command.creation_flags(0x0800_0000);
+        command
+    };
     let mut stdout = transport::Lines::default();
     let mut stderr = transport::Lines::default();
     let outcome = transport::run(

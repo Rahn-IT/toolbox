@@ -236,7 +236,7 @@ impl Engine {
     }
 
     fn command(&self, path: &Path) -> Command {
-        let mut command = match &self.settings {
+        let command = match &self.settings {
             scanner::Settings::Avast(settings) => avast::command(&self.executable, path, settings),
             scanner::Settings::Defender => defender::command(&self.executable, path),
             scanner::Settings::Custom(settings) => {
@@ -244,7 +244,11 @@ impl Engine {
             }
         };
         #[cfg(windows)]
-        command.creation_flags(0x0800_0000);
+        let command = {
+            let mut command = command;
+            command.creation_flags(0x0800_0000);
+            command
+        };
         command
     }
 }
