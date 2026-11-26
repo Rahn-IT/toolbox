@@ -100,6 +100,14 @@ impl App {
             confirm_abort: false,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn screenshot_fixture() -> Self {
+        Self {
+            scan: Some(Box::new(scan::State::screenshot_fixture())),
+            ..Self::default()
+        }
+    }
     /// Apply an event and forward screen tasks.
     pub fn update(&mut self, message: Message) -> Action<Message> {
         match message {

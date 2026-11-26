@@ -90,6 +90,30 @@ pub struct OverLimit {
 }
 
 impl PathLengthChecker {
+    #[cfg(test)]
+    pub(crate) fn screenshot_fixture() -> Self {
+        let crate::Module::PathLengthChecker(mut state) = Self::new().0 else {
+            unreachable!("path checker constructor returns a path checker");
+        };
+        state.selected = Some("/Shared/Projects".into());
+        state.scan_status = ScanStatus::Done;
+        state.scanned = 18432;
+        state.paths_over_limit = [
+            "Quarterly financial report with supporting documentation.xlsx",
+            "Approved architectural drawings and installation requirements.pdf",
+            "Customer acceptance checklist and final delivery notes.docx",
+        ]
+        .into_iter()
+        .map(|name| {
+            let path = format!(
+                "/Shared/Projects/Office renovation/Documentation/External partners/Engineering and facilities management/Planning and approvals/Archived revisions/Reviewed documents/Final delivery package/Supporting materials/{name}"
+            );
+            OverLimit { size: path.len() as u64, path }
+        })
+        .collect();
+        state
+    }
+
     pub const TITLE: &'static str = "Path Length Checker";
 
     pub fn new() -> crate::OpenedModule {

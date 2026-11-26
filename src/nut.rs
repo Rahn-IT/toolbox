@@ -19,6 +19,14 @@ pub struct Nut {
 }
 
 impl Nut {
+    #[cfg(test)]
+    pub(crate) fn screenshot_fixture() -> Self {
+        Self {
+            connect: connect::Connect::new(),
+            monitor: Some(monitor::Monitor::screenshot_fixture()),
+        }
+    }
+
     pub const TITLE: &'static str = "NUT Client";
 
     pub fn new() -> crate::OpenedModule {

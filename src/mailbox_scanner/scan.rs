@@ -359,6 +359,30 @@ impl State {
         state
     }
 
+    #[cfg(test)]
+    pub(super) fn screenshot_fixture() -> Self {
+        let mut state = Self::preview();
+        for (finding, (subject, sender)) in state.rows.iter_mut().zip([
+            (
+                "Invoice for office supplies",
+                "Accounts <accounts@example.invalid>",
+            ),
+            (
+                "Updated delivery schedule",
+                "Shipping <shipping@example.invalid>",
+            ),
+            (
+                "Shared project documents",
+                "Projects <projects@example.invalid>",
+            ),
+        ]) {
+            finding.subject = subject.into();
+            finding.sender = sender.into();
+            finding.detail.clear();
+        }
+        state
+    }
+
     fn receive(&mut self, event: event::Event) {
         match event {
             event::Event::Discovering => self.discovering = true,

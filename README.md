@@ -16,9 +16,13 @@ This is a small collection of useful tools as a simple to download and run execu
 
 # tools
 
+![Tool search](screenshots/search.png)
+
 ## Mailbox scanner
 
 This simple tool connects to an IMAP mailbox, downloads all mails as `.eml` files temporarily and lets either Avast or Windows Defender check them. Infected mails can be downloaded into a local quarantine folder and purged from the mail server.
+
+![Mailbox scanner](screenshots/mailbox-scanner.png)
 
 ## quick install (windows only)
 
@@ -30,9 +34,7 @@ This is just a small list of applications I need from time to time. PRs are welc
 
 ## Quick tools (Windows only)
 
-Search lists each maintenance tool separately. Selecting one starts it right away and opens a tab that shows progress and the result.
-
-On Windows, Toolbox requests administrator access at startup. If the request is canceled or fails, Toolbox still opens and marks tools that require administrator access as unavailable.
+Some simpler helpers for some configurations I commonly need
 
 - Run AdwCleaner
 - Clear Browser Default Extensions and Policies for Chrome, Firefox, and Edge
@@ -48,30 +50,22 @@ The encoder and decoder supports the following formats:
 - Base64
 - Unicode codepoints
 
+![Base64 encoder](screenshots/encoder-base64.png)
+
 ## Path Length Checker
 
 This is a simple application to find paths which are over the windows path limit of 260 characters or close to it.
 
 You can Scan a path and then export the found paths into a CSV file.
 
-### Screenshots
-
-![grafik](https://github.com/user-attachments/assets/468261dd-6224-419b-95f0-b94cdfb53894)
-
-### Usage
-
-- [Download the latest version](https://github.com/Rahn-IT/toolbox/releases/latest/download/toolbox-v0.4.6-windows-x86_64.exe)
-- Open the program and select the folder you'd like to scan
-- Optionally change the limit from the default of 240 (windows causes problems once over 260)
-- Click "Start Scan"
-- Wait for the scan to finish
-- Click on "Export CSV" and select a location to save your report
+![grafik](screenshots/path-length-checker.png)
 
 ## Wake on LAN
 
-Open Wake on LAN from Search, enter the device's MAC address, and select **Wake** to send a magic packet on the local network.
+Enter a MAC address to send a magic packet to wake up a device.
+In case you don't know the MAC address it reads the ARP table in the hopes that the MAC is still cached.
 
-On Windows and Linux, select an entry from the local ARP cache to fill in its MAC address. **Refresh** rereads the cache.
+![Wake on LAN](screenshots/wake-on-lan.png)
 
 ## Network Scan
 
@@ -81,6 +75,8 @@ Afterwards, Additional Info is collected for netbios and reverse dns name as wel
 
 Not as sophisticated as nmap, but enough for a rough overview.
 
+![Network Scan](screenshots/network-scan.png)
+
 ## Device Scan
 
 Type in the IP of a device to perform a simple scan on only that device instead of the whole network
@@ -88,6 +84,8 @@ Type in the IP of a device to perform a simple scan on only that device instead 
 ## Simple NUT client
 
 I integrated a very simple client which displays the raw numbers from a Network UPS Tools server for debugging.
+
+![NUT client](screenshots/nut-client.png)
 
 # Attribution
 

@@ -13,6 +13,9 @@ mod reverse_dns;
 mod scan;
 mod view;
 
+#[cfg(test)]
+mod screenshot;
+
 use interfaces::Interface;
 
 #[derive(Clone)]

@@ -29,6 +29,36 @@ pub struct Monitor {
 }
 
 impl Monitor {
+    #[cfg(test)]
+    pub(super) fn screenshot_fixture() -> Self {
+        let (_, handle) = Task::<Message>::none().abortable();
+        let name = "office-ups".to_owned();
+        let values = [
+            ("battery.charge", "100"),
+            ("battery.runtime", "2400"),
+            ("battery.voltage", "27.2"),
+            ("input.frequency", "50.0"),
+            ("input.voltage", "230.1"),
+            ("output.voltage", "230.0"),
+            ("ups.load", "28"),
+            ("ups.mfr", "Example Power Systems"),
+            ("ups.model", "Office UPS 1500"),
+            ("ups.realpower", "252"),
+            ("ups.status", "OL"),
+            ("ups.temperature", "26.0"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        Self {
+            status: HashMap::from([(name.clone(), values)]),
+            list: vec![name.clone()],
+            error: None,
+            _drop_handle: handle.abort_on_drop(),
+            selected: Some(name),
+        }
+    }
+
     pub fn new(client: NutClient) -> (Self, Task<Message>) {
         let (task, handle) = Task::sip(
             sipper(|mut sender| async move {

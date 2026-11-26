@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+#[cfg(test)]
+mod tests;
+
 use iced::{
     Alignment, Border, Element, Length, Subscription, Task, Theme,
     keyboard::{self, Key, key::Named},
