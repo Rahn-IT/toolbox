@@ -4,7 +4,7 @@ use iced::{
     Element, Task,
     widget::{column, text},
 };
-use reqwest::{Client, StatusCode, Url, redirect};
+use reqwest::{Client, StatusCode, Url, Version, redirect};
 use tokio::time::Instant;
 
 use super::{check_view, tls};
@@ -24,6 +24,7 @@ const HEADERS: &[(&str, &str)] = &[
 #[derive(Clone)]
 pub struct Report {
     status: StatusCode,
+    version: Version,
     title: Option<String>,
     headers: Vec<(&'static str, String)>,
     redirects: Vec<Redirect>,
@@ -70,6 +71,10 @@ impl State {
         };
         let mut rows = vec![("Status", Some(status))];
         if let Self::Complete(Ok(report)) = self {
+            rows.push((
+                "HTTP version",
+                Some(result_text(format!("{:?}", report.version))),
+            ));
             rows.push((
                 "Page title",
                 Some(result_text(report.title.as_deref().unwrap_or("—"))),
@@ -198,6 +203,7 @@ async fn inspect(host: String, endpoint: SocketAddr, https: bool) -> Result<Repo
         url = next;
     };
     let status = response.status();
+    let version = response.version();
     let headers: Vec<_> = HEADERS
         .iter()
         .filter_map(|&(label, name)| {
@@ -227,6 +233,7 @@ async fn inspect(host: String, endpoint: SocketAddr, https: bool) -> Result<Repo
     }
     Ok(Report {
         status,
+        version,
         headers,
         title,
         redirects,
@@ -372,6 +379,7 @@ mod tests {
             .unwrap();
         server.await.unwrap();
         assert_eq!(report.status, StatusCode::OK);
+        assert_eq!(report.version, Version::HTTP_11);
         assert_eq!(report.title.as_deref(), Some("Example"));
         assert!(report.headers.contains(&("Server", "nginx".into())));
         assert_eq!(report.redirects.len(), 1);

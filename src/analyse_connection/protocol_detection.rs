@@ -42,7 +42,7 @@ impl Detected {
             Protocol::Http => Some(Self::Plain(Application::Http)),
             Protocol::Https => Some(Self::Tls(Some(Application::Http))),
             Protocol::Tls => Some(Self::Tls(None)),
-            Protocol::Unknown | Protocol::Autodetect => None,
+            Protocol::Autodetect => None,
         }
     }
 

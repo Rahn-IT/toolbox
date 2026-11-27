@@ -1,4 +1,9 @@
-use std::{fmt, net::Ipv4Addr};
+#[cfg(any(windows, test))]
+use std::net::Ipv6Addr;
+use std::{
+    fmt,
+    net::{IpAddr, Ipv4Addr},
+};
 
 #[cfg(any(windows, target_os = "linux"))]
 use std::{io, time::Duration};
@@ -20,6 +25,12 @@ impl fmt::Display for Interface {
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum Error {
+    #[cfg(any(windows, target_os = "linux"))]
+    #[error("No route was found for {0}.")]
+    NoRoute(IpAddr),
+    #[cfg(windows)]
+    #[error("Could not determine the route source: {0}")]
+    RouteSource(String),
     #[cfg(any(windows, target_os = "linux"))]
     #[error("{tool} is unavailable: {details}")]
     Unavailable { tool: &'static str, details: String },
@@ -65,11 +76,11 @@ pub(super) async fn list() -> Result<Vec<Interface>, Error> {
 
 #[cfg(windows)]
 pub(super) async fn verify_route(interface: &Interface) -> Result<(), Error> {
-    check_routes(interface, &windows_routes().await?)
+    check_routes(interface, &windows_routes("-4").await?)
 }
 
 #[cfg(windows)]
-async fn windows_routes() -> Result<String, Error> {
+async fn windows_routes(family: &str) -> Result<String, Error> {
     const TOOL: &str = "route.exe";
     let path =
         crate::quick_tools::system::executable(TOOL).map_err(|details| Error::Unavailable {
@@ -77,13 +88,13 @@ async fn windows_routes() -> Result<String, Error> {
             details,
         })?;
     let mut command = Command::new(path);
-    command.args(["print", "-4"]).creation_flags(0x0800_0000);
+    command.args(["print", family]).creation_flags(0x0800_0000);
     read_output(command, TOOL).await
 }
 
 #[cfg(windows)]
 pub(crate) async fn on_link(target: Ipv4Addr) -> Result<Option<Interface>, Error> {
-    let output = windows_routes().await?;
+    let output = windows_routes("-4").await?;
     let routes = parse_routes(&output)?;
     let Some(route) = best_route(&routes, target).filter(|route| route.on_link) else {
         return Ok(None);
@@ -92,6 +103,179 @@ pub(crate) async fn on_link(target: Ipv4Addr) -> Result<Option<Interface>, Error
         .await?
         .into_iter()
         .find(|interface| interface.ip == route.source && interface.is_neighbor(target)))
+}
+
+#[derive(Clone)]
+pub struct RouteDetails {
+    pub interface: Option<String>,
+    pub source: IpAddr,
+    pub gateway: Option<IpAddr>,
+}
+
+#[cfg(windows)]
+pub(crate) async fn route_details(target: IpAddr) -> Result<RouteDetails, Error> {
+    use std::net::SocketAddr;
+    use tokio::net::UdpSocket;
+
+    let bind = if target.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    // Connecting a UDP socket selects a local address without sending a packet.
+    let source = async {
+        let socket = UdpSocket::bind(bind).await?;
+        socket.connect(SocketAddr::new(target, 9)).await?;
+        Ok::<_, io::Error>(socket.local_addr()?.ip())
+    }
+    .await
+    .map_err(|error| Error::RouteSource(error.to_string()))?;
+    let adapters = tokio::task::spawn_blocking(crate::windows_network::adapters)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    let source_adapter = adapters
+        .iter()
+        .find(|adapter| adapter.ip_addresses().contains(&source));
+    let (interface, gateway) = match target {
+        IpAddr::V4(target) => {
+            let output = windows_routes("-4").await?;
+            let routes = parse_routes(&output)?;
+            let route = best_route(&routes, target).ok_or(Error::NoRoute(target.into()))?;
+            let adapter = adapters
+                .iter()
+                .find(|adapter| adapter.ip_addresses().contains(&route.source.into()));
+            (
+                adapter
+                    .or(source_adapter)
+                    .map(|adapter| adapter.friendly_name().to_owned()),
+                route.gateway.map(IpAddr::from),
+            )
+        }
+        IpAddr::V6(target) => {
+            let output = windows_routes("-6").await?;
+            let (index, gateway) = best_ipv6_route(
+                &output,
+                target,
+                source_adapter.map(|adapter| adapter.ipv6_if_index()),
+            )
+            .ok_or(Error::NoRoute(target.into()))?;
+            let interface = adapters
+                .iter()
+                .find(|adapter| adapter.ipv6_if_index() == index)
+                .map_or_else(
+                    || format!("#{index}"),
+                    |adapter| adapter.friendly_name().to_owned(),
+                );
+            (Some(interface), gateway.map(IpAddr::from))
+        }
+    };
+    Ok(RouteDetails {
+        interface,
+        source,
+        gateway,
+    })
+}
+
+#[cfg(any(windows, test))]
+fn best_ipv6_route(
+    output: &str,
+    target: Ipv6Addr,
+    interface: Option<u32>,
+) -> Option<(u32, Option<Ipv6Addr>)> {
+    let mut lines = output.lines().map(str::trim);
+    lines.find(|line| matches!(*line, "Active Routes:" | "Aktive Routen:"))?;
+    let mut best = None;
+    while let Some(line) = lines.next() {
+        if line.starts_with("====") {
+            break;
+        }
+        let mut fields = line.split_ascii_whitespace();
+        let (Some(index), Some(metric), Some(cidr)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let (Ok(index), Ok(metric)) = (index.parse::<u32>(), metric.parse::<u32>()) else {
+            continue;
+        };
+        let gateway = match fields.next() {
+            Some(gateway) => gateway,
+            None => lines
+                .next()
+                .unwrap_or_default()
+                .split_ascii_whitespace()
+                .next()
+                .unwrap_or_default(),
+        };
+        let gateway = match gateway {
+            "On-link" | "Auf" => None,
+            value => match value.split('%').next().and_then(|value| value.parse().ok()) {
+                Some(gateway) => Some(gateway),
+                None => continue,
+            },
+        };
+        let Some((network, prefix)) = cidr.split_once('/').and_then(|(network, prefix)| {
+            Some((
+                network.parse::<Ipv6Addr>().ok()?,
+                prefix.parse::<u8>().ok()?,
+            ))
+        }) else {
+            continue;
+        };
+        if prefix > 128 || interface.is_some_and(|selected| index != selected) {
+            continue;
+        }
+        let mask = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
+        let priority = (std::cmp::Reverse(prefix), metric);
+        if u128::from(target) & mask == u128::from(network) & mask
+            && best
+                .as_ref()
+                .is_none_or(|(previous, _)| priority < *previous)
+        {
+            best = Some((priority, (index, gateway)));
+        }
+    }
+    best.map(|(_, route)| route)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn route_details(target: IpAddr) -> Result<RouteDetails, Error> {
+    let family = if target.is_ipv4() { "-4" } else { "-6" };
+    let mut command = Command::new("ip");
+    command
+        .args([family, "-o", "route", "get", &target.to_string()])
+        .env("LC_ALL", "C");
+    let output = read_output(command, "ip").await?;
+    parse_linux_route(&output).ok_or(Error::NoRoute(target))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn parse_linux_route(output: &str) -> Option<RouteDetails> {
+    let fields: Vec<_> = output.split_ascii_whitespace().collect();
+    let after = |key| {
+        fields
+            .iter()
+            .position(|field| *field == key)
+            .map(|index| &fields[index + 1..])
+    };
+    let source = after("src")?.first()?.parse().ok()?;
+    let interface = Some(after("dev")?.first()?.to_string());
+    let gateway = match after("via") {
+        Some(["inet" | "inet6", address, ..]) | Some([address, ..]) => Some(address.parse().ok()?),
+        Some([]) => return None,
+        None => None,
+    };
+    Some(RouteDetails {
+        interface,
+        source,
+        gateway,
+    })
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub(crate) async fn route_details(_target: IpAddr) -> Result<RouteDetails, Error> {
+    Err(Error::Unsupported)
 }
 
 #[cfg(target_os = "linux")]
@@ -261,6 +445,8 @@ struct Route {
     prefix: u8,
     source: Ipv4Addr,
     on_link: bool,
+    #[cfg(windows)]
+    gateway: Option<Ipv4Addr>,
     metric: u32,
 }
 
@@ -363,6 +549,8 @@ fn parse_routes(output: &str) -> Result<Vec<Route>, Error> {
             prefix,
             source,
             on_link,
+            #[cfg(windows)]
+            gateway: gateway.first().and_then(|gateway| gateway.parse().ok()),
             metric,
         });
     }
@@ -429,6 +617,36 @@ fn sorted(mut interfaces: Vec<Interface>) -> Vec<Interface> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_the_most_specific_ipv6_route_on_the_selected_interface() {
+        let output = "Aktive Routen:\n If Metrik Netzwerkziel Gateway\n\
+            8 5 ::/0 fe80::1\n\
+            13 20 ::/0 fe80::2\n\
+            13 25 2001:db8:1::2/128\n Auf Verbindung\n\
+            ============\n13 1 ::/0 fe80::3";
+        assert_eq!(
+            best_ipv6_route(output, "2001:db8:1::2".parse().unwrap(), Some(13)),
+            Some((13, None))
+        );
+        assert_eq!(
+            best_ipv6_route(output, "2001:db8:2::2".parse().unwrap(), Some(13)),
+            Some((13, Some("fe80::2".parse().unwrap())))
+        );
+    }
+
+    #[test]
+    fn reads_linux_route_source_device_and_next_hop() {
+        let direct = parse_linux_route("192.0.2.2 dev eth0 src 192.0.2.1 uid 1000").unwrap();
+        assert_eq!(direct.interface.as_deref(), Some("eth0"));
+        assert_eq!(direct.source, "192.0.2.1".parse::<IpAddr>().unwrap());
+        assert_eq!(direct.gateway, None);
+        let routed =
+            parse_linux_route("2001:db8:2::2 via fe80::1 dev eth1 src 2001:db8::2 metric 100")
+                .unwrap();
+        assert_eq!(routed.interface.as_deref(), Some("eth1"));
+        assert_eq!(routed.gateway, Some("fe80::1".parse().unwrap()));
+    }
 
     #[test]
     fn selects_the_most_specific_windows_route_for_arp() {

@@ -32,7 +32,10 @@ fn colored_badge<'a, Message: 'a>(
         .into()
 }
 
-pub(super) fn error_badge<'a, Message: 'a>(label: &'a str, error: &'a str) -> Element<'a, Message> {
+pub(super) fn error_badge<'a, Message: 'a>(
+    label: &'a str,
+    error: impl text::IntoFragment<'a>,
+) -> Element<'a, Message> {
     tooltip(
         badge(label, false),
         container(text(error))

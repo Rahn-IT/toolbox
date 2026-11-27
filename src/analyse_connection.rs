@@ -9,6 +9,7 @@ mod tls;
 
 use std::{fmt, net::IpAddr, num::NonZeroU16};
 
+use crate::network_scanner::interfaces;
 use iced::{
     Alignment, Element, Length, Subscription, Task,
     keyboard::{self, Key, key::Named},
@@ -24,26 +25,19 @@ pub enum Protocol {
     Http,
     Https,
     Tls,
-    Unknown,
     Autodetect,
 }
 
 impl Protocol {
-    const ALL: [Self; 5] = [
-        Self::Http,
-        Self::Https,
-        Self::Tls,
-        Self::Unknown,
-        Self::Autodetect,
-    ];
+    const ALL: [Self; 4] = [Self::Autodetect, Self::Http, Self::Https, Self::Tls];
 
-    fn for_port(port: NonZeroU16) -> Self {
+    fn for_port(port: NonZeroU16) -> Option<Self> {
         match crate::network_scanner::ports::web_protocol(port.get()) {
-            Some("http") => Self::Http,
-            Some("https") => Self::Https,
-            _ if port.get() == 8007 => Self::Https,
-            _ if matches!(port.get(), 465 | 636 | 853 | 993 | 995) => Self::Tls,
-            _ => Self::Autodetect,
+            Some("http") => Some(Self::Http),
+            Some("https") => Some(Self::Https),
+            _ if port.get() == 8007 => Some(Self::Https),
+            _ if matches!(port.get(), 465 | 636 | 853 | 993 | 995) => Some(Self::Tls),
+            _ => None,
         }
     }
 }
@@ -54,7 +48,6 @@ impl fmt::Display for Protocol {
             Self::Http => "HTTP",
             Self::Https => "HTTPS",
             Self::Tls => "TLS",
-            Self::Unknown => "Unknown",
             Self::Autodetect => "Autodetect",
         })
     }
@@ -68,6 +61,7 @@ pub enum Message {
     Analyse,
     Resolution(name_resolution::Message),
     LocalLink(local_link::Message),
+    RouteFinished(Result<interfaces::RouteDetails, interfaces::Error>),
     PortConnectivity(port_connectivity::Message),
     HttpFinished(Result<http::Report, String>),
     ShowCertificates,
@@ -84,6 +78,7 @@ pub struct State {
     target_ip: Option<IpAddr>,
     resolver: name_resolution::Resolver,
     local_link: local_link::State,
+    route: Option<Result<interfaces::RouteDetails, interfaces::Error>>,
     port_connectivity: port_connectivity::State,
     tls: tls::State,
     http: http::State,
@@ -125,6 +120,7 @@ impl State {
                 if self.host != host {
                     self.host = host;
                     self.target_ip = None;
+                    self.route = None;
                     self.resolver = name_resolution::Resolver::default();
                     self.local_link = local_link::State::default();
                     self.port_connectivity = port_connectivity::State::default();
@@ -139,7 +135,7 @@ impl State {
                     self.port = port;
                     let current = self.port_number();
                     if previous != current {
-                        self.protocol = current.map(Protocol::for_port);
+                        self.protocol = current.and_then(Protocol::for_port);
                     }
                     self.port_connectivity = port_connectivity::State::default();
                     self.reset_protocol_checks();
@@ -147,11 +143,12 @@ impl State {
                 return Task::none();
             }
             Message::ProtocolSelected(protocol) if self.can_edit() => {
-                self.protocol = Some(protocol);
+                self.protocol = (protocol != Protocol::Autodetect).then_some(protocol);
                 return Task::none();
             }
             Message::Analyse if self.can_analyse() => {
                 self.target_ip = None;
+                self.route = None;
                 self.resolver = name_resolution::Resolver::default();
                 self.local_link = local_link::State::default();
                 self.port_connectivity = self.port_number().map_or(
@@ -164,6 +161,7 @@ impl State {
             }
             Message::Resolution(message) => self.resolver.update(message),
             Message::LocalLink(message) => self.local_link.update(message),
+            Message::RouteFinished(result) => self.route = Some(result),
             Message::HttpFinished(report) => self.http = http::State::Complete(report),
             Message::PortConnectivity(message) => {
                 use port_connectivity::Message as CheckMessage;
@@ -207,13 +205,16 @@ impl State {
     }
 
     fn next_checks(&mut self) -> Task<Message> {
-        if self.target_ip.is_none()
+        let route = if self.target_ip.is_none()
             && let Some(target) = self.resolver.target()
         {
             self.target_ip = Some(target);
             self.local_link.start(target);
             self.port_connectivity.start(target);
-        }
+            Task::perform(interfaces::route_details(target), Message::RouteFinished)
+        } else {
+            Task::none()
+        };
         let resolution = self.resolver.next_checks().map(Message::Resolution);
         let link = self.local_link.next_checks().map(Message::LocalLink);
         let port = self
@@ -236,7 +237,7 @@ impl State {
         self.local_link.update(local_link::Message::ChecksStarted);
         self.port_connectivity
             .update(port_connectivity::Message::CheckStarted);
-        Task::batch([resolution, link, port, http])
+        Task::batch([resolution, link, port, http, route])
     }
 
     fn is_running(&self) -> bool {
@@ -245,6 +246,7 @@ impl State {
             || self.port_connectivity.is_running()
             || self.protocol_check_running()
             || self.http.is_running()
+            || (self.target_ip.is_some() && self.route.is_none())
     }
 
     fn protocol_check_running(&self) -> bool {
@@ -320,7 +322,6 @@ impl State {
                 column![
                     text("Protocol"),
                     pick_list(Protocol::ALL, self.protocol, Message::ProtocolSelected)
-                        .placeholder("Select a protocol")
                         .padding([12, 16])
                         .width(Length::Fill),
                 ]
@@ -420,6 +421,7 @@ impl State {
             "Connectivity",
             Some(target),
             [
+                ("Route", Some(self.route_view())),
                 (
                     "ARP-Table",
                     self.local_link
@@ -438,7 +440,7 @@ impl State {
                         .view()
                         .map(|view| view.map(Message::PortConnectivity)),
                 ),
-                ("Protocol", self.protocol_view()),
+                ("Detected Protocol", self.protocol_view()),
                 (
                     "TLS Handshake",
                     self.tls.view().map(|view| {
@@ -456,6 +458,29 @@ impl State {
                 ),
             ],
         )
+    }
+
+    fn route_view(&self) -> Element<'_, Message> {
+        let Some(result) = &self.route else {
+            return check_view::checking();
+        };
+        match result {
+            Ok(route) => column![
+                route
+                    .interface
+                    .as_deref()
+                    .map(|interface| text(format!("Interface {interface}"))),
+                text(format!("Source {}", route.source)),
+                text(
+                    route
+                        .gateway
+                        .map_or_else(|| "On-link".into(), |gateway| format!("Via {gateway}"))
+                ),
+            ]
+            .spacing(4)
+            .into(),
+            Err(error) => check_view::error_badge("Route unavailable", error.to_string()),
+        }
     }
 }
 
@@ -480,7 +505,7 @@ mod tests {
         assert!(ssh.conflicts_with(https));
         assert!(!tls.conflicts_with(https));
         assert!(!https.conflicts_with(tls));
-        state.protocol = Some(Protocol::Unknown);
+        state.protocol = None;
         assert_eq!(state.protocol_for_follow_up(), Some(ssh));
     }
 
@@ -520,15 +545,15 @@ mod tests {
         let mut state = State::default();
         let _ = state.update(Message::PortEdited("443".into()));
         assert!(state.protocol == Some(Protocol::Https));
-        let _ = state.update(Message::ProtocolSelected(Protocol::Unknown));
+        let _ = state.update(Message::ProtocolSelected(Protocol::Autodetect));
         let _ = state.update(Message::PortEdited("0443".into()));
-        assert!(state.protocol == Some(Protocol::Unknown));
+        assert!(state.protocol.is_none());
         for (port, protocol) in [
             ("8080", Some(Protocol::Http)),
             ("8006", Some(Protocol::Https)),
             ("8007", Some(Protocol::Https)),
             ("993", Some(Protocol::Tls)),
-            ("12345", Some(Protocol::Autodetect)),
+            ("12345", None),
             ("", None),
         ] {
             let _ = state.update(Message::PortEdited(port.into()));
@@ -557,7 +582,7 @@ mod tests {
             assert!(matches!(state.resolver, name_resolution::Resolver::Ip(_)));
             assert!(state.resolver.view().is_none());
             assert_eq!(state.target_ip, state.resolver.target());
-            assert_eq!(ping.units(), 1);
+            assert_eq!(ping.units(), 2);
         }
     }
 
@@ -584,6 +609,6 @@ mod tests {
             matches!(state.port_connectivity, port_connectivity::State::Checking(endpoint)
             if endpoint.ip() == ip && endpoint.port() == 443)
         );
-        assert_eq!(tasks.units(), 2);
+        assert_eq!(tasks.units(), 3);
     }
 }

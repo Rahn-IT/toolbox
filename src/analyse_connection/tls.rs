@@ -4,7 +4,10 @@ use std::{
 };
 
 use hickory_client::proto::rr::Name;
-use iced::{Alignment, Element, widget::row};
+use iced::{
+    Alignment, Element,
+    widget::{column, row, text},
+};
 use tokio::{net::TcpStream, time::Instant};
 use tokio_rustls::{
     TlsConnector,
@@ -53,6 +56,8 @@ pub struct Report {
     pub presented: PresentedCertificate,
     handshake: Result<(), String>,
     pub peer_alert: bool,
+    version: Option<rustls::ProtocolVersion>,
+    alpn: Option<Vec<u8>>,
 }
 
 #[derive(Default)]
@@ -98,10 +103,22 @@ impl State {
                     x509_parser::parse_x509_certificate(der.as_ref())
                         .is_ok_and(|(_, certificate)| is_self_signed(&certificate))
                 });
-                row![status, self_signed.then(|| badge("Self-signed", false))]
-                    .align_y(Alignment::Center)
-                    .spacing(8)
-                    .into()
+                column![
+                    row![status, self_signed.then(|| badge("Self-signed", false))]
+                        .align_y(Alignment::Center)
+                        .spacing(8),
+                    report.version.map(|version| text(match version {
+                        rustls::ProtocolVersion::TLSv1_2 => "TLS 1.2".to_owned(),
+                        rustls::ProtocolVersion::TLSv1_3 => "TLS 1.3".to_owned(),
+                        version => format!("{version:?}"),
+                    })),
+                    report
+                        .alpn
+                        .as_deref()
+                        .map(|alpn| { text(format!("ALPN {}", alpn.escape_ascii())) }),
+                ]
+                .spacing(4)
+                .into()
             }
             _ => return None,
         })
@@ -152,6 +169,15 @@ pub(super) async fn inspect(
         presented,
         handshake: result.as_ref().map(|_| ()).map_err(ToString::to_string),
         peer_alert,
+        version: result
+            .as_ref()
+            .ok()
+            .and_then(|stream| stream.get_ref().1.protocol_version()),
+        alpn: result
+            .as_ref()
+            .ok()
+            .and_then(|stream| stream.get_ref().1.alpn_protocol())
+            .map(<[u8]>::to_vec),
     };
     (report, result.ok())
 }
