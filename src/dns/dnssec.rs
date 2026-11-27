@@ -105,7 +105,7 @@ impl Bounded {
         if Instant::now() >= self.deadline
             || self
                 .queries
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
                     (used < MAX_WIRE_QUERIES).then_some(used + 1)
                 })
                 .is_err()
