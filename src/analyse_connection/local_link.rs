@@ -4,9 +4,11 @@ use std::{
 };
 
 use iced::{
-    Alignment, Border, Color, Element, Length, Task, color,
-    widget::{column, container, row, rule, text, tooltip},
+    Alignment, Element, Task,
+    widget::{column, row, text},
 };
+
+use super::check_view::{badge, checking, error_badge, section};
 
 use crate::{
     arp,
@@ -126,8 +128,8 @@ impl State {
         let arp = run.phase.arp_view();
         Some(
             column![
-                check_section("Ping", run.target, "ICMP echo", ping),
-                arp.map(|result| check_section("Local Link", run.target, "ARP", result)),
+                arp.map(|result| section(format!("Local Link ({})", run.target), "ARP", result)),
+                section(format!("Ping ({})", run.target), "ICMP echo", ping),
             ]
             .spacing(24)
             .into(),
@@ -169,61 +171,6 @@ impl ArpResult {
             Self::Failed(error) => error_badge("ARP unavailable", error),
         })
     }
-}
-
-fn badge(label: &str, positive: bool) -> Element<'_, Message> {
-    let background = if positive {
-        color!(0x167344)
-    } else {
-        color!(0xB32539)
-    };
-    container(text(label).size(14).color(Color::WHITE))
-        .padding([3, 8])
-        .style(move |_| container::background(background).border(Border::default().rounded(5.0)))
-        .into()
-}
-
-fn error_badge<'a>(label: &'static str, error: &'a str) -> Element<'a, Message> {
-    tooltip(
-        badge(label, false),
-        container(text(error))
-            .padding(8)
-            .style(container::rounded_box),
-        tooltip::Position::Bottom,
-    )
-    .into()
-}
-
-fn checking() -> Element<'static, Message> {
-    row![crate::loading::spinner(), text("Checking")]
-        .align_y(Alignment::Center)
-        .spacing(8)
-        .into()
-}
-
-fn check_section<'a>(
-    title: &str,
-    target: IpAddr,
-    label: &'static str,
-    result: Element<'a, Message>,
-) -> Element<'a, Message> {
-    column![
-        text(format!("{title} ({target})")).size(24),
-        container(row![text("Check").width(160), text("Result")].spacing(12)).padding([0, 12]),
-        rule::horizontal(1),
-        container(
-            row![
-                text(label).width(160),
-                container(result).width(Length::Fill)
-            ]
-            .spacing(12)
-        )
-        .width(Length::Fill)
-        .padding([10, 12])
-        .style(container::rounded_box),
-    ]
-    .spacing(8)
-    .into()
 }
 
 fn arp_target(target: IpAddr) -> Option<Ipv4Addr> {

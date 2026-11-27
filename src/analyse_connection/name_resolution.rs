@@ -444,14 +444,23 @@ impl HostnameChecks {
         let Check::Complete(configured) = &self.configured else {
             return (false, false);
         };
-        let local_override = [&self.authoritative, &self.cloudflare, &self.google]
-            .into_iter()
-            .any(|reference| match reference {
-                Check::Complete(report) => {
-                    different_addresses(&configured.addresses, &report.addresses)
-                }
-                _ => false,
-            });
+        let references = [&self.authoritative, &self.cloudflare, &self.google];
+        let local_override = references.iter().all(|check| !check.outstanding())
+            && configured
+                .addresses
+                .iter()
+                .enumerate()
+                .any(|(family, local)| {
+                    let Some(local) = local else { return false };
+                    let answers: Vec<_> = references
+                        .iter()
+                        .filter_map(|reference| match reference {
+                            Check::Complete(report) => report.addresses[family].as_ref(),
+                            _ => None,
+                        })
+                        .collect();
+                    differs_from_consensus(local, &answers)
+                });
         let system_override = match &self.system {
             Check::Complete(addresses) => {
                 let system = [true, false].map(|ipv4| {
@@ -468,6 +477,26 @@ impl HostnameChecks {
             _ => false,
         };
         (local_override, system_override)
+    }
+}
+
+fn differs_from_consensus(local: &BTreeSet<IpAddr>, references: &[&BTreeSet<IpAddr>]) -> bool {
+    let [first, _, ..] = references else {
+        return false;
+    };
+    if references
+        .iter()
+        .any(|reference| *reference == local || !reference.is_disjoint(local))
+    {
+        return false;
+    }
+
+    if first.is_empty() {
+        references.iter().all(|reference| reference.is_empty())
+    } else {
+        first
+            .iter()
+            .any(|ip| references.iter().all(|reference| reference.contains(ip)))
     }
 }
 
@@ -565,23 +594,34 @@ mod tests {
         };
         let first = IpAddr::from([192, 0, 2, 1]);
         let second = IpAddr::from([192, 0, 2, 2]);
+        let third = IpAddr::from([192, 0, 2, 3]);
         let unrelated_v6 = "2001:db8::1".parse().unwrap();
-        checks.configured = Check::Complete(DnsReport {
-            addresses: [Some(BTreeSet::from([first, second])), None],
-            ..String::new().into()
-        });
+        let answer = |ips: &[IpAddr]| {
+            Check::Complete(DnsReport {
+                addresses: [Some(ips.iter().copied().collect()), None],
+                ..String::new().into()
+            })
+        };
+
+        checks.configured = answer(&[first, second]);
         checks.system = Check::Complete(vec![second, first, unrelated_v6]);
-        checks.google = Check::Failed("Timed out".into());
+        checks.authoritative = answer(&[first]);
+        checks.cloudflare = answer(&[first]);
+        checks.google = answer(&[third]);
         assert_eq!(checks.dns_overrides(), (false, false));
 
-        checks.cloudflare = Check::Complete(DnsReport {
-            addresses: [Some(BTreeSet::from([first])), None],
-            ..String::new().into()
-        });
+        checks.configured = answer(&[third]);
+        checks.system = Check::Complete(vec![third]);
+        checks.google = Check::Checking;
+        assert_eq!(checks.dns_overrides(), (false, false));
+        checks.google = Check::Failed("Timed out".into());
         assert_eq!(checks.dns_overrides(), (true, false));
 
         checks.system = Check::Complete(vec![second]);
         assert_eq!(checks.dns_overrides(), (true, true));
+
+        checks.cloudflare = answer(&[second]);
+        assert_eq!(checks.dns_overrides(), (false, true));
     }
 
     #[test]

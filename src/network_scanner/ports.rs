@@ -62,6 +62,10 @@ pub(super) fn definition(number: u16) -> Option<&'static Port> {
         .find(|port| port.number == number)
 }
 
+pub(crate) fn web_protocol(number: u16) -> Option<&'static str> {
+    definition(number).and_then(|port| port.web_protocol)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     Open,

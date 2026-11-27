@@ -9,7 +9,7 @@ pub mod interfaces;
 pub(crate) mod name_lookup;
 pub(crate) mod netbios;
 pub(crate) mod ping;
-mod ports;
+pub(crate) mod ports;
 mod scan;
 mod view;
 
