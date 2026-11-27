@@ -182,21 +182,6 @@ impl State {
             Message::LocalLink(message) => self.local_link.update(message),
             Message::RouteFinished(result) => {
                 self.route = Some(result);
-                if let Some(Ok(route)) = &self.route
-                    && let Some(ip @ IpAddr::V4(_)) = route.gateway
-                    && route.source.is_ipv4()
-                {
-                    self.gateway = Some(gateway::Gateway {
-                        ip,
-                        source: route.source,
-                        interface: route.interface.clone(),
-                        result: None,
-                    });
-                    return Task::perform(
-                        gateway::Gateway::check(ip, route.source, route.interface.clone()),
-                        Message::GatewayFinished,
-                    );
-                }
             }
             Message::GatewayFinished(result) => {
                 if let Some(gateway) = &mut self.gateway {
@@ -257,6 +242,25 @@ impl State {
             Task::none()
         };
         let resolution = self.resolver.next_checks().map(Message::Resolution);
+        let gateway = if self.gateway.is_none()
+            && self.local_link.ping_failed()
+            && let Some(Ok(route)) = &self.route
+            && let Some(ip @ IpAddr::V4(_)) = route.gateway
+            && route.source.is_ipv4()
+        {
+            self.gateway = Some(gateway::Gateway {
+                ip,
+                source: route.source,
+                interface: route.interface.clone(),
+                result: None,
+            });
+            Task::perform(
+                gateway::Gateway::check(ip, route.source, route.interface.clone()),
+                Message::GatewayFinished,
+            )
+        } else {
+            Task::none()
+        };
         let link = self.local_link.next_checks().map(Message::LocalLink);
         let port = self
             .port_connectivity
@@ -278,7 +282,7 @@ impl State {
         self.local_link.update(local_link::Message::ChecksStarted);
         self.port_connectivity
             .update(port_connectivity::Message::CheckStarted);
-        Task::batch([resolution, link, port, http, route])
+        Task::batch([resolution, link, port, http, route, gateway])
     }
 
     fn is_running(&self) -> bool {
@@ -518,15 +522,17 @@ impl State {
             None => (check_view::checking(), None),
             Some(Ok(route)) => (
                 text(route.source.to_string()).into(),
-                Some(if let Some(gateway) = &self.gateway {
-                    gateway.view(gateway.ip.to_string())
-                } else {
-                    text(
-                        route
-                            .gateway
-                            .map_or_else(|| "On-link".into(), |gateway| gateway.to_string()),
-                    )
-                    .into()
+                self.local_link.ping_failed().then(|| {
+                    if let Some(gateway) = &self.gateway {
+                        gateway.view(gateway.ip.to_string())
+                    } else {
+                        text(
+                            route
+                                .gateway
+                                .map_or_else(|| "On-link".into(), |gateway| gateway.to_string()),
+                        )
+                        .into()
+                    }
                 }),
             ),
             Some(Err(error)) => (
@@ -540,6 +546,51 @@ impl State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_hop_waits_for_failed_echo_in_either_completion_order() {
+        use crate::network_scanner::ping::Outcome;
+
+        for outcome in [
+            Outcome::Reply(None),
+            Outcome::NoReply,
+            Outcome::TimedOut,
+            Outcome::Failed("Ping unavailable".into()),
+        ] {
+            for route_first in [true, false] {
+                let mut state = State::default();
+                let _ = state.update(Message::HostEdited("198.51.100.24".into()));
+                let _ = state.update(Message::Analyse);
+                let route = Message::RouteFinished(Ok(interfaces::RouteDetails {
+                    interface: Some("test".into()),
+                    source: [192, 0, 2, 10].into(),
+                    gateway: Some([192, 0, 2, 1].into()),
+                }));
+                let echo = Message::LocalLink(local_link::Message::PingFinished(
+                    ping_check::PingResult(outcome.clone()),
+                ));
+                let (first, second) = if route_first {
+                    (route, echo)
+                } else {
+                    (echo, route)
+                };
+                let _ = state.update(first);
+                assert!(state.gateway.is_none());
+                assert!(state.route_views().1.is_none());
+                let _ = state.update(second);
+                assert_eq!(
+                    state.gateway.is_some(),
+                    !matches!(outcome, Outcome::Reply(_))
+                );
+                assert_eq!(state.route_views().1.is_some(), state.gateway.is_some());
+                assert_eq!(state.next_checks().units(), 0);
+                if state.gateway.is_some() {
+                    let _ = state.update(Message::GatewayFinished(gateway::GatewayResult::Outside));
+                    assert_eq!(state.next_checks().units(), 0);
+                }
+            }
+        }
+    }
 
     #[test]
     fn preference_keeps_explicit_selection_and_observation_independent() {

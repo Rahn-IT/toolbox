@@ -81,6 +81,19 @@ impl State {
             .is_some_and(|run| !matches!(run.phase, Phase::Done(..)))
     }
 
+    pub(super) fn ping_failed(&self) -> bool {
+        match self.run.as_ref().map(|run| &run.phase) {
+            Some(
+                Phase::RoutePending(ping, _)
+                | Phase::CheckingRoute(ping, _)
+                | Phase::ArpPending(ping, ..)
+                | Phase::ReadingArp(ping)
+                | Phase::Done(ping, _),
+            ) => !matches!(ping.0, crate::network_scanner::ping::Outcome::Reply(_)),
+            _ => false,
+        }
+    }
+
     pub fn update(&mut self, message: Message) {
         let Some(run) = &mut self.run else { return };
         run.phase = match (

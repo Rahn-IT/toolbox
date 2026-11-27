@@ -817,7 +817,7 @@ fn parse_routes(output: &str) -> Result<Vec<Route>, Error> {
     Err(ERROR)
 }
 
-#[cfg(any(windows, target_os = "linux", test))]
+#[cfg(any(windows, test))]
 fn prefix_mask(prefix: u8) -> u32 {
     u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0)
 }
