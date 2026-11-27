@@ -1,4 +1,4 @@
-mod lookup;
+pub(super) mod lookup;
 
 use std::{
     collections::BTreeSet,
@@ -540,9 +540,10 @@ impl HostnameChecks {
                     Message::CacheFinished,
                 )
             }
-            ReadyCheck::System => {
-                Task::perform(lookup::system(self.host.clone()), Message::SystemFinished)
-            }
+            ReadyCheck::System => Task::perform(
+                crate::dns::system_lookup(self.host.clone()),
+                Message::SystemFinished,
+            ),
             ReadyCheck::NetBios => {
                 let Check::Complete(addresses) = &self.system else {
                     return Task::none();

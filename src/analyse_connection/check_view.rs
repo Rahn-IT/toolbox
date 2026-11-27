@@ -62,7 +62,7 @@ pub(super) fn checking<'a, Message: 'a>() -> Element<'a, Message> {
 pub(super) fn table<'a, Message: 'a>(
     title: &'static str,
     target: Option<String>,
-    checks: impl IntoIterator<Item = (&'static str, Option<Element<'a, Message>>)>,
+    checks: impl IntoIterator<Item = (&'a str, Option<Element<'a, Message>>)>,
 ) -> Option<Element<'a, Message>> {
     const CHECK_WIDTH: f32 = 160.0;
     let mut rows = checks

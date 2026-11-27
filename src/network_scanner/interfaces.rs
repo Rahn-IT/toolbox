@@ -25,7 +25,6 @@ impl fmt::Display for Interface {
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum Error {
-    #[cfg(any(windows, target_os = "linux"))]
     #[error("No route was found for {0}.")]
     NoRoute(IpAddr),
     #[cfg(windows)]
@@ -60,7 +59,7 @@ pub enum Error {
 }
 
 #[cfg(windows)]
-pub(super) async fn list() -> Result<Vec<Interface>, Error> {
+pub(crate) async fn list() -> Result<Vec<Interface>, Error> {
     const TOOL: &str = "netsh.exe";
     let path =
         crate::quick_tools::system::executable(TOOL).map_err(|details| Error::Unavailable {
@@ -129,7 +128,12 @@ pub(crate) async fn route_details(target: IpAddr) -> Result<RouteDetails, Error>
         Ok::<_, io::Error>(socket.local_addr()?.ip())
     }
     .await
-    .map_err(|error| Error::RouteSource(error.to_string()))?;
+    .map_err(|error| match error.kind() {
+        io::ErrorKind::NetworkUnreachable | io::ErrorKind::HostUnreachable => {
+            Error::NoRoute(target)
+        }
+        _ => Error::RouteSource(error.to_string()),
+    })?;
     let adapters = tokio::task::spawn_blocking(crate::windows_network::adapters)
         .await
         .ok()
@@ -246,10 +250,265 @@ pub(crate) async fn route_details(target: IpAddr) -> Result<RouteDetails, Error>
     command
         .args([family, "-o", "route", "get", &target.to_string()])
         .env("LC_ALL", "C");
-    let output = read_output(command, "ip").await?;
-    parse_linux_route(&output).ok_or(Error::NoRoute(target))
+    let output = match read_output(command, "ip").await {
+        Err(Error::Command { details, .. })
+            if details.ends_with("Network is unreachable")
+                || details.ends_with("No route to host") =>
+        {
+            return Err(Error::NoRoute(target));
+        }
+        result => result?,
+    };
+    parse_linux_route(&output).ok_or(Error::Unrecognized { tool: "ip" })
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct AdapterLink {
+    pub status: &'static str,
+    pub physical: Option<bool>,
+    pub ips: Vec<Ipv4Addr>,
+}
+pub(crate) type AdapterLinks = std::collections::BTreeMap<String, AdapterLink>;
+
+pub(crate) type AddressOrigins = std::collections::BTreeMap<(String, Ipv4Addr), &'static str>;
+
+#[cfg(windows)]
+pub(crate) async fn address_origins() -> Option<AddressOrigins> {
+    let mut command = Command::new(crate::quick_tools::system::executable("netsh.exe").ok()?);
+    command
+        .args(["interface", "ipv4", "show", "ipaddresses", "level=verbose"])
+        .creation_flags(0x0800_0000);
+    Some(windows_address_origins(
+        &read_output(command, "netsh.exe").await.ok()?,
+    ))
+}
+
+#[cfg(any(windows, test))]
+fn windows_address_origins(output: &str) -> AddressOrigins {
+    let mut origins = AddressOrigins::new();
+    let mut current = None;
+    let mut interface = None;
+    for line in output.lines().map(str::trim) {
+        if let Some((key, value)) = line.split_once(':') {
+            match key.trim() {
+                "Interface Luid" | "Interface LUID" | "Schnittstellen-LUID" => {
+                    interface = Some(value.trim())
+                }
+                "Address Type" | "Adresstyp" => {
+                    let origin = match value.trim() {
+                        "DHCP" | "Dhcp" => "DHCP",
+                        "Manual" | "Manuell" => "Static",
+                        _ => continue,
+                    };
+                    if let (Some(ip), Some(name)) = (current, interface) {
+                        origins.insert((name.to_owned(), ip), origin);
+                    }
+                }
+                _ => {}
+            }
+        } else if let Some(ip) = line
+            .split_whitespace()
+            .find_map(|word| word.parse::<Ipv4Addr>().ok())
+        {
+            current = Some(ip);
+            interface = None;
+        }
+    }
+    origins
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn address_origins() -> Option<AddressOrigins> {
+    let mut command = Command::new("ip");
+    command
+        .args(["-o", "-4", "address", "show"])
+        .env("LC_ALL", "C");
+    let output = read_output(command, "ip").await.ok()?;
+    let mut origins = AddressOrigins::new();
+    for line in output.lines() {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        let [_, device, "inet", cidr, tail @ ..] = fields.as_slice() else {
+            continue;
+        };
+        let Some((ip, _)) = parse_cidr(cidr) else {
+            continue;
+        };
+        let Some(origin) = tail.windows(2).find_map(|pair| match pair {
+            ["proto", "dhcp"] => Some("DHCP"),
+            ["proto", "static"] => Some("Static"),
+            _ => None,
+        }) else {
+            continue;
+        };
+        origins.insert((device.split('@').next()?.to_owned(), ip), origin);
+    }
+    // NetworkManager can identify the leased address even without a kernel address protocol.
+    let mut nm = Command::new("nmcli");
+    nm.args([
+        "-t",
+        "-e",
+        "no",
+        "-f",
+        "GENERAL.DEVICE,DHCP4.OPTION",
+        "device",
+        "show",
+    ])
+    .env("LC_ALL", "C");
+    if let Ok(output) = read_output(nm, "nmcli").await {
+        let mut device = None;
+        for line in output.lines() {
+            if let Some(name) = line.strip_prefix("GENERAL.DEVICE:") {
+                device = Some(name);
+            } else if line.starts_with("DHCP4.OPTION")
+                && let Some((_, value)) = line.split_once(':')
+                && let Some(ip) = value
+                    .trim()
+                    .strip_prefix("ip_address = ")
+                    .and_then(|ip| ip.parse().ok())
+                && let Some(name) = device
+            {
+                origins.insert((name.to_owned(), ip), "DHCP");
+            }
+        }
+    }
+    Some(origins)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub(crate) async fn address_origins() -> Option<AddressOrigins> {
+    None
+}
+
+#[cfg(windows)]
+pub(crate) async fn adapter_links() -> Result<AdapterLinks, String> {
+    let adapters = tokio::task::spawn_blocking(crate::windows_network::adapters)
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    let mut links: AdapterLinks = adapters
+        .into_iter()
+        .filter(|a| a.if_type() != ipconfig::IfType::SoftwareLoopback)
+        .map(|a| {
+            (
+                a.friendly_name().to_owned(),
+                AdapterLink {
+                    status: if a.oper_status() == ipconfig::OperStatus::IfOperStatusUp {
+                        "Link up"
+                    } else {
+                        "Link unavailable"
+                    },
+                    physical: None,
+                    ips: a
+                        .ip_addresses()
+                        .iter()
+                        .filter_map(|ip| match ip {
+                            IpAddr::V4(ip) => Some(*ip),
+                            _ => None,
+                        })
+                        .collect(),
+                },
+            )
+        })
+        .collect();
+    // ipconfig lacks administrative and physical media state, and may omit disabled adapters.
+    let path = crate::quick_tools::system::executable(r"WindowsPowerShell\v1.0\powershell.exe")
+        .map_err(|e| e.to_string())?;
+    let mut command = Command::new(path);
+    command.creation_flags(0x0800_0000).args(["-NoProfile", "-NonInteractive", "-Command",
+        r#"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); Get-NetAdapter -ErrorAction Stop | ForEach-Object { "{0}`t{1}`t{2}`t{3}`t{4}`t{5}" -f $_.AdminStatus,$_.Status,$_.MediaConnectionState,$_.HardwareInterface,$_.InterfaceType,$_.Name }"#]);
+    if let Ok(output) = read_output(command, "Get-NetAdapter").await {
+        for line in output.lines() {
+            let fields: Vec<_> = line.splitn(6, '\t').collect();
+            let [admin, status, media, hardware, kind, name] = fields.as_slice() else {
+                continue;
+            };
+            let link = links.entry((*name).to_owned()).or_default();
+            link.physical = match *hardware {
+                "True" => Some(true),
+                "False" => Some(false),
+                _ => None,
+            };
+            link.status = match (*admin, *status, *media, *hardware, *kind) {
+                ("Down", ..) | (_, "Disabled", ..) => "Disabled",
+                (_, "Up", ..) => "Link up",
+                (_, _, "Disconnected", "True", "6") => "Cable disconnected",
+                (_, _, "Disconnected", ..) => "Disconnected",
+                _ => "Link unavailable",
+            };
+        }
+    }
+    Ok(links)
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn adapter_links() -> Result<AdapterLinks, String> {
+    let mut command = Command::new("ip");
+    command.args(["-o", "link", "show"]).env("LC_ALL", "C");
+    let output = read_output(command, "ip")
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut links = AdapterLinks::new();
+    for line in output.lines() {
+        let (_, rest) = line.split_once(": ").ok_or("Invalid ip link output")?;
+        let (name, rest) = rest.split_once(": <").ok_or("Invalid ip link flags")?;
+        let (flags, details) = rest.split_once('>').ok_or("Invalid ip link flags")?;
+        let has = |flag| flags.split(',').any(|f| f == flag);
+        if has("LOOPBACK") {
+            continue;
+        }
+        let name = name.split('@').next().unwrap_or(name);
+        let sys = std::path::Path::new("/sys/class/net").join(name);
+        let status = if !has("UP") {
+            "Disabled"
+        } else if has("LOWER_UP") {
+            "Link up"
+        } else if has("NO-CARRIER")
+            && details.contains("link/ether ")
+            && sys.join("device").exists()
+            && !sys.join("wireless").exists()
+            && !sys.join("phy80211").exists()
+        {
+            "Cable disconnected"
+        } else {
+            "Link unavailable"
+        };
+        links.insert(
+            name.into(),
+            AdapterLink {
+                status,
+                physical: if sys.join("device").exists() {
+                    Some(true)
+                } else {
+                    sys.canonicalize()
+                        .ok()
+                        .and_then(|p| p.starts_with("/sys/devices/virtual/net").then_some(false))
+                },
+                ips: Vec::new(),
+            },
+        );
+    }
+    let mut command = Command::new("ip");
+    command
+        .args(["-o", "-4", "address", "show"])
+        .env("LC_ALL", "C");
+    for interface in parse_linux(
+        &read_output(command, "ip")
+            .await
+            .map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?
+    {
+        if let Some(link) = links.get_mut(&interface.name) {
+            link.ips.push(interface.ip);
+        }
+    }
+    Ok(links)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub(crate) async fn adapter_links() -> Result<AdapterLinks, String> {
+    Err(Error::Unsupported.to_string())
+}
 #[cfg(any(target_os = "linux", test))]
 fn parse_linux_route(output: &str) -> Option<RouteDetails> {
     let fields: Vec<_> = output.split_ascii_whitespace().collect();
@@ -299,10 +558,11 @@ pub(crate) async fn on_link(_target: Ipv4Addr) -> Result<Option<Interface>, Erro
     Err(Error::Unsupported)
 }
 
-#[cfg(any(windows, target_os = "linux"))]
 impl Interface {
-    fn is_neighbor(&self, target: Ipv4Addr) -> bool {
-        let mask = prefix_mask(self.prefix);
+    pub(crate) fn is_neighbor(&self, target: Ipv4Addr) -> bool {
+        let mask = u32::MAX
+            .checked_shl(32 - u32::from(self.prefix))
+            .unwrap_or(0);
         target != self.ip && (u32::from(target) & mask) == (u32::from(self.ip) & mask)
     }
 }
@@ -342,7 +602,7 @@ pub(super) async fn verify_route(_interface: &Interface) -> Result<(), Error> {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) async fn list() -> Result<Vec<Interface>, Error> {
+pub(crate) async fn list() -> Result<Vec<Interface>, Error> {
     let mut command = Command::new("ip");
     command
         .args(["-o", "-4", "address", "show", "up"])
@@ -351,7 +611,7 @@ pub(super) async fn list() -> Result<Vec<Interface>, Error> {
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-pub(super) async fn list() -> Result<Vec<Interface>, Error> {
+pub(crate) async fn list() -> Result<Vec<Interface>, Error> {
     Err(Error::Unsupported)
 }
 
@@ -617,6 +877,19 @@ fn sorted(mut interfaces: Vec<Interface>) -> Vec<Interface> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_address_origin_belongs_to_the_specific_interface_and_address() {
+        let origins = windows_address_origins(
+            "Adresse 10.0.0.2 Parameter\nSchnittstellen-LUID : Ethernet\nAdresstyp : DHCP\nAddress 10.0.0.3 Parameters\nInterface Luid : Ethernet\nAddress Type : Manual\nAddress 10.0.0.4 Parameters\nInterface Luid : Ethernet\nAddress Type : Other",
+        );
+        assert_eq!(origins.len(), 2);
+        assert_eq!(origins[&("Ethernet".into(), [10, 0, 0, 2].into())], "DHCP");
+        assert_eq!(
+            origins[&("Ethernet".into(), [10, 0, 0, 3].into())],
+            "Static"
+        );
+    }
 
     #[test]
     fn reads_the_most_specific_ipv6_route_on_the_selected_interface() {

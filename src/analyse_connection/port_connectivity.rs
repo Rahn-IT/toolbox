@@ -34,6 +34,17 @@ pub enum Outcome {
     Failed(String),
 }
 
+impl Outcome {
+    pub(super) fn view<M: 'static>(&self) -> Element<'_, M> {
+        match self {
+            Self::Connected => badge("Connected", true),
+            Self::Refused => badge("Connection refused", false),
+            Self::TimedOut => badge("Timed out", false),
+            Self::Failed(error) => error_badge("Connection failed", error),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) enum State {
     #[default]
@@ -89,12 +100,7 @@ impl State {
     pub fn view(&self) -> Option<Element<'_, Message>> {
         Some(match self {
             Self::Checking(_) => checking(),
-            Self::Complete(_, outcome) => match outcome {
-                Outcome::Connected => badge("Connected", true),
-                Outcome::Refused => badge("Connection refused", false),
-                Outcome::TimedOut => badge("Timed out", false),
-                Outcome::Failed(error) => error_badge("Connection failed", error),
-            },
+            Self::Complete(_, outcome) => outcome.view(),
             _ => return None,
         })
     }
@@ -254,7 +260,7 @@ async fn plaintext(target: &Target) -> Option<Application> {
         .map(|()| Application::Dns)
 }
 
-async fn connect(endpoint: SocketAddr) -> Result<TcpStream, Outcome> {
+pub(super) async fn connect(endpoint: SocketAddr) -> Result<TcpStream, Outcome> {
     match tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(endpoint)).await {
         Ok(Ok(stream)) => Ok(stream),
         Ok(Err(error)) if error.kind() == ErrorKind::ConnectionRefused => Err(Outcome::Refused),

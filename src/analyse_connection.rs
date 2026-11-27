@@ -3,6 +3,8 @@ mod check_view;
 mod http;
 mod local_link;
 mod name_resolution;
+mod network_baseline;
+mod ping_check;
 mod port_connectivity;
 mod protocol_detection;
 #[cfg(test)]
@@ -61,6 +63,7 @@ pub enum Message {
     PortEdited(String),
     ProtocolSelected(Protocol),
     Analyse,
+    Baseline(network_baseline::Message),
     Resolution(name_resolution::Message),
     LocalLink(local_link::Message),
     RouteFinished(Result<interfaces::RouteDetails, interfaces::Error>),
@@ -72,6 +75,7 @@ pub enum Message {
 
 #[derive(Default)]
 pub struct State {
+    baseline: network_baseline::State,
     host: String,
     port: String,
     protocol: Option<Protocol>,
@@ -149,6 +153,10 @@ impl State {
                 return Task::none();
             }
             Message::Analyse if self.can_analyse() => {
+                let baseline = self.baseline.start().map(Message::Baseline);
+                if self.host.trim().is_empty() {
+                    return baseline;
+                }
                 self.target_ip = None;
                 self.route = None;
                 self.resolver = name_resolution::Resolver::default();
@@ -160,6 +168,10 @@ impl State {
                 self.reset_protocol_checks();
                 self.resolver
                     .update(name_resolution::Message::Start(self.host.trim().into()));
+                return Task::batch([baseline, self.next_checks()]);
+            }
+            Message::Baseline(message) => {
+                return self.baseline.update(message).map(Message::Baseline);
             }
             Message::Resolution(message) => self.resolver.update(message),
             Message::LocalLink(message) => self.local_link.update(message),
@@ -243,7 +255,8 @@ impl State {
     }
 
     fn is_running(&self) -> bool {
-        self.resolver.is_running()
+        self.baseline.is_running()
+            || self.resolver.is_running()
             || self.local_link.is_running()
             || self.port_connectivity.is_running()
             || self.protocol_check_running()
@@ -258,7 +271,7 @@ impl State {
     }
 
     fn can_analyse(&self) -> bool {
-        !self.host.trim().is_empty() && self.can_edit() && self.valid_port()
+        self.can_edit() && (self.host.trim().is_empty() || self.valid_port())
     }
 
     fn can_edit(&self) -> bool {
@@ -337,6 +350,7 @@ impl State {
 
         let content = column![
             container(container(form).width(Length::Fill).max_width(680)).center_x(Length::Fill),
+            self.baseline.view().map(|view| view.map(Message::Baseline)),
             self.resolver
                 .view()
                 .map(|view| view.map(Message::Resolution)),
@@ -607,8 +621,18 @@ mod tests {
             assert!(matches!(state.resolver, name_resolution::Resolver::Ip(_)));
             assert!(state.resolver.view().is_none());
             assert_eq!(state.target_ip, state.resolver.target());
-            assert_eq!(ping.units(), 2);
+            assert_eq!(ping.units(), 4);
         }
+    }
+
+    #[test]
+    fn empty_hostname_starts_only_the_baseline() {
+        let mut state = State::default();
+        assert_eq!(state.update(Message::Analyse).units(), 2);
+        assert!(state.baseline.is_running());
+        assert!(state.resolver.view().is_none());
+        assert!(state.connectivity_view().is_none());
+        assert!(!state.can_analyse());
     }
 
     #[test]

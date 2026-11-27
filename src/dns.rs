@@ -1,4 +1,9 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeSet,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
 use futures_util::StreamExt;
 use hickory_client::{
@@ -17,6 +22,21 @@ use tokio_rustls::rustls;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
 pub(crate) mod dnssec;
+
+pub(crate) async fn system_lookup(host: String) -> Result<Vec<IpAddr>, String> {
+    let lookup = tokio::time::timeout(TIMEOUT, tokio::net::lookup_host((host.as_str(), 0))).await;
+    match lookup {
+        Ok(Ok(addresses)) => {
+            let mut seen = BTreeSet::new();
+            Ok(addresses
+                .map(|address| address.ip())
+                .filter(|ip| seen.insert(*ip))
+                .collect())
+        }
+        Ok(Err(error)) => Err(error.to_string()),
+        Err(_) => Err("Timed out".into()),
+    }
+}
 
 #[cfg(unix)]
 pub(crate) async fn configured_server() -> Result<Option<SocketAddr>, String> {

@@ -3,17 +3,14 @@ use std::{
     time::Duration,
 };
 
-use iced::{
-    Alignment, Element, Task,
-    widget::{row, text},
-};
+use super::ping_check::PingResult;
+use iced::{Element, Task};
 
 use super::check_view::{badge, checking, error_badge};
 
-use crate::{
-    arp,
-    network_scanner::{interfaces, ping},
-};
+#[cfg(test)]
+use crate::network_scanner::ping;
+use crate::{arp, network_scanner::interfaces};
 
 #[derive(Clone)]
 pub enum Message {
@@ -22,9 +19,6 @@ pub enum Message {
     RouteFinished(Option<interfaces::Interface>),
     ArpFinished(ArpResult),
 }
-
-#[derive(Clone)]
-pub struct PingResult(ping::Outcome);
 
 #[derive(Clone)]
 pub enum ArpResult {
@@ -118,7 +112,9 @@ impl State {
             return Task::none();
         };
         match &run.phase {
-            Phase::PingPending => Task::perform(ping_target(run.target), Message::PingFinished),
+            Phase::PingPending => {
+                Task::perform(PingResult::check(run.target), Message::PingFinished)
+            }
             Phase::RoutePending(_, ip) => {
                 let ip = *ip;
                 Task::perform(
@@ -126,9 +122,10 @@ impl State {
                     Message::RouteFinished,
                 )
             }
-            Phase::ArpPending(_, ip, interface) => {
-                Task::perform(read_arp(*ip, interface.clone()), Message::ArpFinished)
-            }
+            Phase::ArpPending(_, ip, interface) => Task::perform(
+                read_arp(*ip, interface.ip, interface.name.clone()),
+                Message::ArpFinished,
+            ),
             _ => Task::none(),
         }
     }
@@ -160,23 +157,8 @@ impl Phase {
     }
 }
 
-impl PingResult {
-    fn view(&self) -> Element<'_, Message> {
-        match &self.0 {
-            ping::Outcome::Reply(timing) => {
-                row![badge("Reply", true), timing.as_deref().map(text),]
-                    .align_y(Alignment::Center)
-                    .spacing(8)
-                    .into()
-            }
-            ping::Outcome::NoReply | ping::Outcome::TimedOut => badge("No reply", false),
-            ping::Outcome::Failed(error) => error_badge("No reply", error),
-        }
-    }
-}
-
 impl ArpResult {
-    fn view(&self) -> Option<Element<'_, Message>> {
+    pub(super) fn view<M: 'static>(&self) -> Option<Element<'_, M>> {
         Some(match self {
             Self::Skipped => return None,
             Self::Mac(mac) => badge(mac, true),
@@ -200,17 +182,10 @@ fn arp_target(target: IpAddr) -> Option<Ipv4Addr> {
     }
 }
 
-async fn ping_target(target: IpAddr) -> PingResult {
-    PingResult(match ping::prepare().await {
-        Ok(runner) => runner.echo(None, target).await,
-        Err(error) => ping::Outcome::Failed(error),
-    })
-}
-
-async fn read_arp(ip: Ipv4Addr, interface: interfaces::Interface) -> ArpResult {
+pub(super) async fn read_arp(ip: Ipv4Addr, local_ip: Ipv4Addr, device: String) -> ArpResult {
     let scope = arp::Scope::Interface {
-        local_ip: interface.ip,
-        device: &interface.name,
+        local_ip,
+        device: &device,
     };
     match tokio::time::timeout(Duration::from_secs(3), arp::read(scope)).await {
         Ok(Ok(entries)) => entries

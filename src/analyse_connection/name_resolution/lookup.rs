@@ -19,33 +19,14 @@ use crate::{
     network_scanner::netbios,
 };
 
-pub(super) const CLOUDFLARE: Server = Server::Https(
+pub(in crate::analyse_connection) const CLOUDFLARE: Server = Server::Https(
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(1, 1, 1, 1), 443)),
     "cloudflare-dns.com",
 );
-pub(super) const GOOGLE: Server = Server::Https(
+pub(in crate::analyse_connection) const GOOGLE: Server = Server::Https(
     SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(8, 8, 8, 8), 443)),
     "dns.google",
 );
-
-pub(super) async fn system(host: String) -> Result<Vec<IpAddr>, String> {
-    let lookup = tokio::time::timeout(
-        Duration::from_secs(3),
-        tokio::net::lookup_host((host.as_str(), 0)),
-    )
-    .await;
-    match lookup {
-        Ok(Ok(addresses)) => {
-            let mut seen = BTreeSet::new();
-            Ok(addresses
-                .map(|address| address.ip())
-                .filter(|ip| seen.insert(*ip))
-                .collect())
-        }
-        Ok(Err(error)) => Err(error.to_string()),
-        Err(_) => Err("Timed out".into()),
-    }
-}
 
 pub(super) async fn netbios(ipv4: Vec<Ipv4Addr>) -> Result<Option<String>, String> {
     let runner =
@@ -88,7 +69,9 @@ pub(super) async fn netbios(ipv4: Vec<Ipv4Addr>) -> Result<Option<String>, Strin
     }
 }
 
-pub(super) async fn configured(name: Name) -> (Option<SocketAddr>, Result<DnsReport, String>) {
+pub(in crate::analyse_connection) async fn configured(
+    name: Name,
+) -> (Option<SocketAddr>, Result<DnsReport, String>) {
     match dns::configured_server().await {
         Ok(Some(address)) => (
             Some(address),
@@ -99,7 +82,10 @@ pub(super) async fn configured(name: Name) -> (Option<SocketAddr>, Result<DnsRep
     }
 }
 
-pub(super) async fn public(server: Server, name: Name) -> Result<DnsReport, String> {
+pub(in crate::analyse_connection) async fn public(
+    server: Server,
+    name: Name,
+) -> Result<DnsReport, String> {
     resolver_lookup(server, &name).await
 }
 
@@ -113,9 +99,9 @@ type AddressResponses = [Result<DnsResponse, String>; 2];
 
 #[derive(Clone)]
 pub struct DnsReport {
-    pub(super) details: String,
+    pub(in crate::analyse_connection) details: String,
     pub(super) nameservers: Vec<Name>,
-    pub(super) addresses: [Option<BTreeSet<IpAddr>>; 2],
+    pub(in crate::analyse_connection) addresses: [Option<BTreeSet<IpAddr>>; 2],
 }
 
 struct Authority {
