@@ -5,6 +5,8 @@ mod local_link;
 mod name_resolution;
 mod port_connectivity;
 mod protocol_detection;
+#[cfg(test)]
+mod screenshot;
 mod tls;
 
 use std::{fmt, net::IpAddr, num::NonZeroU16};

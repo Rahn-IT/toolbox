@@ -69,6 +69,22 @@ pub(super) enum State {
 }
 
 impl State {
+    #[cfg(test)]
+    pub(super) fn screenshot_fixture() -> Self {
+        Self::Complete(Report {
+            presented: PresentedCertificate {
+                verification: Some(Err(rustls::Error::InvalidCertificate(
+                    CertificateError::UnknownIssuer,
+                ))),
+                ..PresentedCertificate::default()
+            },
+            handshake: Ok(()),
+            peer_alert: false,
+            version: Some(rustls::ProtocolVersion::TLSv1_3),
+            alpn: Some(b"http/1.1".to_vec()),
+        })
+    }
+
     pub fn start(&mut self) {
         if matches!(self, Self::Disabled) {
             *self = Self::Checking;

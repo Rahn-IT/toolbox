@@ -33,6 +33,29 @@ pub struct State {
 impl State {
     pub const TITLE: &'static str = "DNS Cache";
 
+    #[cfg(test)]
+    pub(crate) fn screenshot_fixture() -> Self {
+        let entries = [
+            ("docs.example", "IN A 192.0.2.20\nIN AAAA 2001:db8::20"),
+            ("mail.example", "IN A 192.0.2.30"),
+            ("portal.example", "IN CNAME edge.example"),
+            ("edge.example", "IN A 198.51.100.24\nIN AAAA 2001:db8::24"),
+            ("status.example", "IN A 203.0.113.15"),
+        ];
+        Self {
+            filter: "example".into(),
+            entries: Some(Ok(entries
+                .into_iter()
+                .map(|(name, records)| Entry {
+                    name: name.into(),
+                    records: records.into(),
+                })
+                .collect())),
+            flushing: false,
+            flush_status: None,
+        }
+    }
+
     pub fn new() -> OpenedModule {
         let state = Self {
             filter: String::new(),

@@ -89,6 +89,38 @@ pub enum Resolver {
 }
 
 impl Resolver {
+    #[cfg(test)]
+    pub(super) fn screenshot_fixture(target: IpAddr) -> Self {
+        let mut resolver = Self::Empty;
+        resolver.update(Message::Start("portal.example".into()));
+        let Self::Hostname(checks) = &mut resolver else {
+            unreachable!("fixture uses a hostname");
+        };
+        let report = |details: String, address| DnsReport {
+            details,
+            addresses: [Some(BTreeSet::from([address])), None],
+            nameservers: Vec::new(),
+        };
+        let public = || {
+            report(
+                "CNAME portal.example. → edge.example.\n198.51.100.24".into(),
+                [198, 51, 100, 24].into(),
+            )
+        };
+        let mut authority = public();
+        authority
+            .nameservers
+            .push(Name::from_ascii("ns1.example.").unwrap());
+        checks.cache = Check::Complete(Some(format!("IN A {target}")));
+        checks.system = Check::Complete(vec![target]);
+        checks.configured_server = Some(([192, 0, 2, 1], 53).into());
+        checks.configured = Check::Complete(report("192.0.2.30".into(), [192, 0, 2, 30].into()));
+        checks.google = Check::Complete(public());
+        checks.cloudflare = Check::Complete(public());
+        checks.authoritative = Check::Complete(authority);
+        resolver
+    }
+
     pub fn is_running(&self) -> bool {
         matches!(self, Self::Hostname(_)) && !self.done()
     }

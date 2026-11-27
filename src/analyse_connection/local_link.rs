@@ -55,6 +55,25 @@ enum Phase {
 }
 
 impl State {
+    #[cfg(test)]
+    pub(super) fn screenshot_fixture(target: IpAddr, on_link: bool) -> Self {
+        Self {
+            run: Some(Run {
+                target,
+                phase: Phase::Done(
+                    PingResult(ping::Outcome::Reply(Some(
+                        if on_link { "1 ms" } else { "18 ms" }.into(),
+                    ))),
+                    if on_link {
+                        ArpResult::Mac("02:00:00:00:00:14".into())
+                    } else {
+                        ArpResult::Skipped
+                    },
+                ),
+            }),
+        }
+    }
+
     pub fn start(&mut self, target: IpAddr) {
         self.run.get_or_insert(Run {
             target,

@@ -4,20 +4,13 @@ use iced::{Settings, Theme, widget::text_editor};
 
 use super::super::TabManager;
 use crate::{
-    Module, encoder, mailbox_scanner, network_scanner, nut, path_length_checker, wake_on_lan,
+    Module, analyse_connection, dns_cache, encoder, mailbox_scanner, network_scanner, nut,
+    path_length_checker, wake_on_lan,
 };
 
 #[test]
 #[ignore = "Generates README screenshots; run with just screenshots"]
 fn generate_readme_screenshots() -> Result<(), Box<dyn std::error::Error>> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let output = root.join("screenshots");
-    let staging = root
-        .join("target/readme-screenshots")
-        .join(std::process::id().to_string());
-    fs::create_dir_all(&output)?;
-    fs::create_dir_all(&staging)?;
-
     let mut screens = vec![
         ("search", Module::Search(String::new())),
         (
@@ -69,11 +62,56 @@ fn generate_readme_screenshots() -> Result<(), Box<dyn std::error::Error>> {
         screens.push(("quick-install", Module::QuickInstall(install)));
     }
 
-    for (name, module) in screens {
+    render_screens(
+        screens
+            .into_iter()
+            .map(|(name, module)| (name, module, 850.0))
+            .chain(connection_screens()),
+    )
+}
+
+#[test]
+#[ignore = "Generates the DNS and connection analyzer screenshots"]
+fn generate_connection_screenshots() -> Result<(), Box<dyn std::error::Error>> {
+    render_screens(connection_screens())
+}
+
+fn connection_screens() -> [(&'static str, Module, f32); 3] {
+    [
+        (
+            "dns-cache",
+            Module::DnsCache(dns_cache::State::screenshot_fixture()),
+            520.0,
+        ),
+        (
+            "connection-analyzer-dns",
+            Module::AnalyseConnection(analyse_connection::State::screenshot_dns_fixture()),
+            1340.0,
+        ),
+        (
+            "connection-analyzer-https",
+            Module::AnalyseConnection(analyse_connection::State::screenshot_https_fixture()),
+            1330.0,
+        ),
+    ]
+}
+
+fn render_screens(
+    screens: impl IntoIterator<Item = (&'static str, Module, f32)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output = root.join("screenshots");
+    let staging = root
+        .join("target/readme-screenshots")
+        .join(std::process::id().to_string());
+    fs::create_dir_all(&output)?;
+    fs::create_dir_all(&staging)?;
+
+    for (name, module, height) in screens {
         let mut app = TabManager::default();
         app.tabs.insert(0, module);
         let mut simulator =
-            iced_test::Simulator::with_size(Settings::default(), (1400.0, 850.0), app.view());
+            iced_test::Simulator::with_size(Settings::default(), (1400.0, height), app.view());
 
         // iced adds a renderer suffix and only writes missing images. An empty staging
         // directory lets every run regenerate images while keeping published names stable.

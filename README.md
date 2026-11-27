@@ -1,6 +1,8 @@
 # Rahn-IT toolbox
 
-This is a small collection of useful tools as a simple to download and run executable written in Rust.
+This is my personal toolbox written in rust.
+
+It provides a lot of helpers and shortcuts for my daily work and can help with network os OS diagnostics.
 
 ## ⚠️WARNING⚠️
 
@@ -9,14 +11,28 @@ This is a small collection of useful tools as a simple to download and run execu
 >
 > These are mostly internal tools. They are made public for your convinience and inspiration.
 >
-> These tools were mostly built because we need them. They are not as polish as a public app probably should be.
-> Nevertheless, they might be useful to you, so I'm keeping this public. 
+> These tools were mostly built because we need them. They are not as polished as a public app probably should be.
+> Nevertheless, they might be useful to you, so I'm keeping this public.
 >
 > Feel free to check out the code if you're unsure
 
 # tools
 
 ![Tool search](screenshots/search.png)
+
+## Analyze Connection Problems
+
+Enter a hostname or ip and an optional port and this tool will check everything from DNS to the ARP-Table and give you anything you need to diagnose a connection issue.
+
+![Connection analysis showing encrypted DNS lookups, DNS overrides, and a refused TCP connection](screenshots/connection-analyzer-dns.png)
+
+![Connection analysis showing an untrusted TLS issuer and an HTTP redirect ending in 403 Forbidden](screenshots/connection-analyzer-https.png)
+
+## DNS Cache
+
+Search and refresh cached DNS records, or flush the cache where supported.
+
+![DNS Cache showing filtered A, AAAA, and CNAME records](screenshots/dns-cache.png)
 
 ## Mailbox scanner
 
@@ -30,7 +46,7 @@ The quick install is basically the same as ninite or other quick install tools.
 It just downloads the installers and runs them for you. It will still ask for admin rights if needed though.
 This is just a small list of applications I need from time to time. PRs are welcome though.
 
-<img width="804" height="724" alt="quick_install" src="https://github.com/user-attachments/assets/bfb833c1-49f7-4a61-8fbc-68a6aa5eb05e" />
+![Quick Install with selected applications](screenshots/quick-install.png)
 
 ## Quick tools (Windows only)
 

@@ -48,6 +48,25 @@ pub(super) enum State {
 }
 
 impl State {
+    #[cfg(test)]
+    pub(super) fn screenshot_fixture() -> Self {
+        Self::Complete(Ok(Report {
+            status: StatusCode::FORBIDDEN,
+            version: Version::HTTP_11,
+            title: Some("Access denied".into()),
+            headers: vec![
+                ("Server", "nginx".into()),
+                ("Content-Type", "text/html; charset=utf-8".into()),
+            ],
+            redirects: vec![Redirect {
+                status: StatusCode::FOUND,
+                from: Url::parse("https://198.51.100.24/").unwrap(),
+                to: Url::parse("https://198.51.100.24/admin/").unwrap(),
+            }],
+            redirect_stop: None,
+        }))
+    }
+
     pub fn start(&mut self, host: &str, endpoint: SocketAddr, https: bool) -> Task<super::Message> {
         if !matches!(self, Self::Skipped) {
             return Task::none();
