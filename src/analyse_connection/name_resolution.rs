@@ -276,6 +276,20 @@ impl Resolver {
             .chain(configured.map(|report| ("Configured DNS", &report.validation)))
             .collect::<Vec<_>>();
 
+        if reports.iter().all(|(_, report)| {
+            matches!(
+                report.verdict,
+                dnssec::Verdict::Unsigned | dnssec::Verdict::Unavailable
+            ) && !report.details.iter().any(|finding| {
+                matches!(
+                    finding.kind,
+                    RecordVerified | DenialVerified | MissingSignature | InvalidSignature
+                )
+            })
+        }) {
+            return None;
+        }
+
         let mut findings: Vec<(&dnssec::Finding, Vec<&str>)> = Vec::new();
         for (source, report) in &reports {
             for finding in &report.details {
