@@ -409,23 +409,17 @@ impl State {
             return None;
         }
         let Some(detected) = self.observed_protocol() else {
-            return Some(text("Inconclusive").into());
+            return Some(check_view::neutral_badge("Inconclusive"));
         };
-        let label = detected.to_string();
-        let protocol = match self
+        let mismatch = self
             .protocol
             .and_then(|selected| detected.comparison(selected))
-        {
-            Some(matches) => check_view::badge(label, matches),
-            None => text(label).into(),
-        };
+            == Some(false);
         Some(
             row![
-                protocol,
+                check_view::badge(detected.to_string(), !mismatch),
                 space::horizontal(),
-                self.protocol_for_follow_up()
-                    .is_some_and(|expected| detected.conflicts_with(expected))
-                    .then(|| { check_view::badge("Protocol mismatch", false) }),
+                mismatch.then(|| check_view::badge("Protocol mismatch", false)),
             ]
             .spacing(8)
             .align_y(Alignment::Center)
