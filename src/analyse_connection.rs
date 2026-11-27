@@ -523,12 +523,7 @@ impl State {
         match &self.route {
             None => (check_view::checking(), None),
             Some(Ok(route)) => (
-                column![
-                    route.interface.as_deref().map(text),
-                    text(format!("Source {}", route.source)),
-                ]
-                .spacing(4)
-                .into(),
+                text(route.source.to_string()).into(),
                 Some(if let Some(gateway) = &self.gateway {
                     gateway.view(gateway.ip.to_string())
                 } else {
