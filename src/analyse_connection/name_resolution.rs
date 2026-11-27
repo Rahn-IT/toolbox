@@ -9,7 +9,7 @@ use crate::dns::dnssec;
 use hickory_client::proto::rr::Name;
 use iced::{
     Alignment, Border, Element, Length, Task, color,
-    widget::{column, container, row, rule, space, text},
+    widget::{column, container, row, rule, text},
 };
 use lookup::DnsReport;
 
@@ -260,50 +260,102 @@ impl Resolver {
         if matches!(checks.cache, Check::Pending | Check::Checking) {
             return None;
         }
-        let mut rows =
-            PublicProvider::ALL
-                .map(|provider| {
-                    let result =
-                        checks.dnssec[provider as usize].view(|report| {
-                            column(report.details.iter().map(|line| {
-                                text(line).wrapping(text::Wrapping::WordOrGlyph).into()
-                            }))
-                            .spacing(4)
-                            .into()
-                        });
-                    (provider.name(), result)
-                })
-                .into_iter()
-                .collect::<Vec<_>>();
-        if !matches!(checks.configured_signatures, Check::Pending) {
-            rows.push((
-                "Configured DNS",
-                checks.configured_signatures.view(|report| {
-                    let mut result = column![].spacing(4);
-                    if !report.observed.is_empty() {
-                        result = result.push(text("Returned signatures").size(14));
-                        result =
-                            result.extend(report.observed.iter().map(|line| {
-                                text(line).wrapping(text::Wrapping::WordOrGlyph).into()
-                            }));
-                    }
-                    result
-                        .push(
-                            row![
-                                text("Local validation").size(14),
-                                space::horizontal(),
-                                dnssec_badge(report.validation.verdict),
-                            ]
-                            .align_y(Alignment::Center),
-                        )
-                        .extend(
-                            report.validation.details.iter().map(|line| {
-                                text(line).wrapping(text::Wrapping::WordOrGlyph).into()
-                            }),
-                        )
-                        .into()
-                }),
-            ));
+        use dnssec::FindingKind::*;
+        let configured = match &checks.configured_signatures {
+            Check::Complete(report) => Some(report),
+            _ => None,
+        };
+        let reports = PublicProvider::ALL
+            .into_iter()
+            .filter_map(|provider| {
+                let Check::Complete(report) = &checks.dnssec[provider as usize] else {
+                    return None;
+                };
+                Some((provider.name(), report))
+            })
+            .chain(configured.map(|report| ("Configured DNS", &report.validation)))
+            .collect::<Vec<_>>();
+
+        let mut findings: Vec<(&dnssec::Finding, Vec<&str>)> = Vec::new();
+        for (source, report) in &reports {
+            for finding in &report.details {
+                if let Some((_, sources)) = findings.iter_mut().find(|(item, _)| *item == finding) {
+                    sources.push(source);
+                } else {
+                    findings.push((finding, vec![source]));
+                }
+            }
+        }
+
+        let groups: &[(&str, &[dnssec::FindingKind])] = &[
+            ("Root key", &[RootTrusted]),
+            (
+                "Delegations",
+                &[
+                    DelegationVerified,
+                    KeysPublished,
+                    UnsignedDelegation,
+                    KeyLinkUnavailable,
+                    DelegationUnavailable,
+                ],
+            ),
+            (
+                "Record signatures",
+                &[
+                    RecordVerified,
+                    DenialVerified,
+                    MissingSignature,
+                    InvalidSignature,
+                ],
+            ),
+            ("Unavailable", &[ProofUnavailable]),
+        ];
+        let mut rows = Vec::new();
+        for &(label, kinds) in groups {
+            let mut entries = findings
+                .iter()
+                .filter(|(finding, _)| kinds.contains(&finding.kind))
+                .peekable();
+            if entries.peek().is_some() {
+                let results = column(entries.map(|(finding, sources)| {
+                    let source = (sources.len() < reports.len()).then(|| sources.join(", "));
+                    dnssec_finding(finding, source)
+                }))
+                .spacing(6);
+                rows.push((label, Some(results.into())));
+            }
+        }
+        if let Some(report) = configured
+            && !report.observed.is_empty()
+        {
+            let result = column![dnssec_badge(report.validation.verdict)].extend(
+                report
+                    .observed
+                    .iter()
+                    .filter(|finding| finding.kind != SignaturesReturned)
+                    .map(|finding| {
+                        if finding.kind == NoSignaturesReturned && finding.answer.is_some() {
+                            let sources = PublicProvider::ALL.into_iter().filter(|provider| {
+                                matches!(&checks.dnssec[*provider as usize], Check::Complete(report)
+                                    if report.details.iter().any(|public| public.kind == RecordVerified && public.answer == finding.answer))
+                            }).map(|provider| provider.name()).collect::<Vec<_>>();
+                            if !sources.is_empty() {
+                                return row![
+                                    super::check_view::warning_badge("Signature available but not returned"),
+                                    text(format!("{} (validated by {})", finding.subject, sources.join(", "))),
+                                ].align_y(Alignment::Center).spacing(8).into();
+                            }
+                        }
+                        dnssec_finding(finding, None)
+                    }),
+            )
+            .spacing(6);
+            rows.push(("Configured DNS", Some(result.into())));
+        }
+        if checks.dnssec.iter().any(Check::outstanding)
+            || checks.configured_signatures.outstanding()
+        {
+            rows.push(("Validation", Some(super::check_view::checking())));
         }
         super::check_view::table("DNSSEC", None, rows)
     }
@@ -701,6 +753,37 @@ fn dnssec_badge(verdict: dnssec::Verdict) -> Element<'static, Message> {
     }
 }
 
+fn dnssec_finding(finding: &dnssec::Finding, source: Option<String>) -> Element<'_, Message> {
+    use super::check_view::{badge, neutral_badge, warning_badge};
+    use dnssec::FindingKind::*;
+    let status = match finding.kind {
+        RootTrusted => badge("Root key trusted locally", true),
+        DelegationVerified => badge("DS link verified", true),
+        KeysPublished => neutral_badge("DNSKEY published"),
+        UnsignedDelegation => warning_badge("Unsigned"),
+        RecordVerified => badge("Signature verified", true),
+        DenialVerified => badge("Negative answer verified", true),
+        MissingSignature => badge("Missing DNSSEC signature", false),
+        InvalidSignature => badge("Signature invalid", false),
+        KeyLinkUnavailable => neutral_badge("Key link unavailable"),
+        DelegationUnavailable => neutral_badge("DS proof unavailable"),
+        ProofUnavailable => neutral_badge("DnsSec not available"),
+        SignaturesReturned => neutral_badge("Signatures returned"),
+        NoSignaturesReturned => neutral_badge("No signatures returned"),
+        NoRecordsReturned => neutral_badge("No records returned"),
+        SignedDenialReturned => neutral_badge("Signed denial returned"),
+    };
+    row![
+        status,
+        (!finding.subject.is_empty())
+            .then(|| { text(&finding.subject).wrapping(text::Wrapping::WordOrGlyph) }),
+        source.map(|source| text(format!("({source})")).size(13)),
+    ]
+    .align_y(Alignment::Center)
+    .spacing(8)
+    .into()
+}
+
 fn differs_from_consensus(local: &BTreeSet<IpAddr>, references: &[&BTreeSet<IpAddr>]) -> bool {
     let [first, _, ..] = references else {
         return false;
@@ -798,6 +881,48 @@ fn cache_addresses(records: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dnssec_groups_shared_evidence_and_names_the_source_of_a_different_finding() {
+        use dnssec::{Finding, FindingKind, Report, Verdict};
+
+        let mut resolver = Resolver::screenshot_fixture([192, 0, 2, 20].into());
+        let Resolver::Hostname(checks) = &mut resolver else {
+            unreachable!("fixture uses a hostname");
+        };
+        let root = Finding {
+            answer: None,
+            kind: FindingKind::RootTrusted,
+            subject: String::new(),
+        };
+        checks.dnssec = [
+            Check::Complete(Report {
+                verdict: Verdict::Validated,
+                details: vec![root.clone()],
+            }),
+            Check::Complete(Report {
+                verdict: Verdict::Unavailable,
+                details: vec![
+                    root,
+                    Finding {
+                        answer: None,
+                        kind: FindingKind::KeyLinkUnavailable,
+                        subject: "example. → portal.example.".into(),
+                    },
+                ],
+            }),
+        ];
+        let mut ui = iced_test::Simulator::with_size(
+            iced::Settings::default(),
+            (1150.0, 650.0),
+            resolver.dnssec_view().unwrap(),
+        );
+        assert!(ui.find("Root key trusted locally").is_ok());
+        assert!(ui.find("Delegations").is_ok());
+        assert!(ui.find("Key link unavailable").is_ok());
+        assert!(ui.find("(Cloudflare)").is_ok());
+        assert!(ui.find("(Google)").is_err());
+    }
 
     #[test]
     fn override_badges_compare_available_address_sets_independently() {
@@ -898,7 +1023,7 @@ mod tests {
                 provider,
                 dnssec::Report {
                     verdict: dnssec::Verdict::Unavailable,
-                    details: vec!["Timed out".into()],
+                    details: Vec::new(),
                 },
             ));
         }

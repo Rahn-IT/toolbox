@@ -15,6 +15,8 @@ Start with AGENTS.md, the installed Rust guidance, and the master plan. Inspect 
 
 The Iced integration in `src/analyse_connection/name_resolution.rs` schedules diagnostics separately from ordinary DNS and preserves override and target-selection behavior.
 
+The DNSSEC section groups typed findings by root key, delegation, and record signatures. It combines identical observations and labels findings that differ between providers. The Name Resolution table retains the per-provider verdict badges.
+
 Phase 4 queries the same configured DNS endpoint with DO set and reports signature coverage. A separate validation session sets DO and CD and applies the local validator to evidence from that endpoint. Both direct paths fall back to TCP after a truncated UDP response.
 
 Formatting, the locked build, the full test suite, and the live Google and Cloudflare DNSSEC smoke test passed on Windows. Deterministic fixtures cover different delegation and record-signing keys, a stripped signature, authenticated unsigned delegation, and configured DNS over TCP after a truncated UDP reply. The initial missing-signature classification requires an exact signed delegation apex. Ambiguous descendant and NSEC3 unsigned cases remain unavailable. The [workflow configuration](goon.yaml) records the local commands and source paths.

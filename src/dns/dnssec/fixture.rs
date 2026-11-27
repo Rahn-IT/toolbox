@@ -210,11 +210,13 @@ async fn verifies_the_signer_and_detects_a_stripped_signature_under_secure_ds() 
     assert!(
         details
             .iter()
-            .any(|line| line.contains("DS matches DNSKEY")),
+            .any(|finding| finding.kind == FindingKind::DelegationVerified),
         "{details:?}"
     );
     assert!(
-        details.iter().any(|line| line.contains("Verified RRSIG")),
+        details
+            .iter()
+            .any(|finding| finding.kind == FindingKind::RecordVerified),
         "{details:?}"
     );
 
@@ -282,7 +284,14 @@ async fn configured_dns_reports_signatures_from_tcp_after_a_truncated_udp_reply(
     })
     .await
     .unwrap();
-    assert_eq!(details, ["example. A · Signatures returned"]);
+    assert_eq!(
+        details,
+        [Finding {
+            answer: None,
+            kind: FindingKind::SignaturesReturned,
+            subject: "example. A".into(),
+        }]
+    );
 }
 
 #[tokio::test]

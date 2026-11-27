@@ -48,12 +48,38 @@ pub enum Verdict {
 #[derive(Clone)]
 pub struct Report {
     pub(crate) verdict: Verdict,
-    pub(crate) details: Vec<String>,
+    pub(crate) details: Vec<Finding>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FindingKind {
+    RootTrusted,
+    DelegationVerified,
+    KeysPublished,
+    UnsignedDelegation,
+    RecordVerified,
+    DenialVerified,
+    MissingSignature,
+    InvalidSignature,
+    KeyLinkUnavailable,
+    DelegationUnavailable,
+    ProofUnavailable,
+    SignaturesReturned,
+    NoSignaturesReturned,
+    NoRecordsReturned,
+    SignedDenialReturned,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Finding {
+    pub(crate) kind: FindingKind,
+    pub(crate) subject: String,
+    pub(crate) answer: Option<(Name, BTreeSet<RData>)>,
 }
 
 #[derive(Clone)]
 pub struct ConfiguredReport {
-    pub(crate) observed: Vec<String>,
+    pub(crate) observed: Vec<Finding>,
     pub(crate) validation: Report,
 }
 
@@ -260,13 +286,16 @@ impl Session {
         result
     }
 
-    async fn zone(&mut self, zone: &Name, details: &mut Vec<String>) -> Zone {
+    async fn zone(&mut self, zone: &Name, details: &mut Vec<Finding>) -> Zone {
+        use FindingKind::*;
         if let Some(evidence) = self.zones.get(zone) {
             return *evidence;
         }
         let mut current = zone.clone();
         let mut result = Zone::default();
+        let mut chain = Vec::new();
         for step in 0..MAX_STEPS {
+            let details = &mut chain;
             let keys = self.query(&current, RecordType::DNSKEY).await;
             let published: Vec<_> = keys
                 .as_ref()
@@ -276,46 +305,30 @@ impl Session {
                 .filter(|record| record.name == current && record.dns_class == DNSClass::IN)
                 .filter_map(|record| {
                     let key = record.try_borrow::<DNSKEY>()?;
-                    Some((
-                        key.data().calculate_key_tag().ok()?,
-                        key.data().algorithm(),
-                        record.proof,
-                    ))
+                    Some((key.data().calculate_key_tag().ok()?, record.proof))
                 })
                 .collect();
-            if published.is_empty() {
-                push(details, format!("{current} · DNSKEY unavailable"));
-            } else {
-                let tags = published
-                    .iter()
-                    .map(|(tag, algorithm, _)| format!("{tag} ({algorithm:?})"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                push(details, format!("{current} · DNSKEY published · {tags}"));
-                if let Ok(keys) = &keys
-                    && let Some(signature) =
-                        verified_signature(&keys.answers, &current, RecordType::DNSKEY)
-                {
-                    push(
-                        details,
-                        format!(
-                            "{current} · DNSKEY set verified by key {}",
-                            signature.input().key_tag
-                        ),
-                    );
-                }
-            }
             if current.is_root() {
-                if published
-                    .iter()
-                    .any(|(_, _, proof)| *proof == Proof::Secure)
-                {
-                    push(details, "Root DNSKEY trusted locally".into());
+                if published.iter().any(|(_, proof)| *proof == Proof::Secure) {
+                    push(details, RootTrusted, String::new());
                 }
                 break;
             }
+            let published_keys = |details: &mut Vec<Finding>| {
+                if !published.is_empty() {
+                    let tags = published
+                        .iter()
+                        .map(|(tag, _)| tag.to_string())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    push(details, KeysPublished, format!("{current} · key {tags}"));
+                }
+            };
             let Ok(ds) = self.query(&current, RecordType::DS).await else {
-                push(details, format!("{current} · DS proof unavailable"));
+                published_keys(details);
+                push(details, DelegationUnavailable, current.to_string());
                 break;
             };
             let records: Vec<_> = ds
@@ -333,11 +346,12 @@ impl Session {
                 })
                 .collect();
             if records.is_empty() {
+                published_keys(details);
                 if unsigned_delegation(&ds, &current) {
-                    push(details, format!("{current} · Parent proves no DS"));
+                    push(details, UnsignedDelegation, current.to_string());
                     result.unsigned = true;
                 } else {
-                    push(details, format!("{current} · DS proof unavailable"));
+                    push(details, DelegationUnavailable, current.to_string());
                 }
                 break;
             }
@@ -369,10 +383,8 @@ impl Session {
                 })
                 .collect::<BTreeSet<_>>();
             if matches.is_empty() {
-                push(
-                    details,
-                    format!("{parent} → {current} · DS verified, key link unavailable"),
-                );
+                published_keys(details);
+                push(details, KeyLinkUnavailable, format!("{parent} → {current}"));
                 current = parent.clone();
                 continue;
             }
@@ -386,9 +398,13 @@ impl Session {
                 .join(", ");
             push(
                 details,
-                format!("{parent} → {current} · DS matches DNSKEY {tags}"),
+                DelegationVerified,
+                format!("{parent} → {current} · key {tags}"),
             );
             current = parent.clone();
+        }
+        for finding in chain.into_iter().rev() {
+            push(details, finding.kind, finding.subject);
         }
         self.zones.insert(zone.clone(), result);
         result
@@ -398,7 +414,7 @@ impl Session {
         &mut self,
         mut name: Name,
         kind: RecordType,
-        details: &mut Vec<String>,
+        details: &mut Vec<Finding>,
     ) -> Verdict {
         let mut chain = Verdict::Validated;
         let mut seen = BTreeSet::new();
@@ -408,8 +424,12 @@ impl Session {
             }
             let response = match self.query(&name, kind).await {
                 Ok(response) => response,
-                Err(error) => {
-                    push(details, format!("{name} {kind} · {error}"));
+                Err(_) => {
+                    push(
+                        details,
+                        FindingKind::ProofUnavailable,
+                        format!("{name} {kind}"),
+                    );
                     break;
                 }
             };
@@ -427,6 +447,7 @@ impl Session {
             ) {
                 push(
                     details,
+                    FindingKind::ProofUnavailable,
                     format!("{name} {kind} · {}", raw.metadata.response_code),
                 );
                 break;
@@ -462,9 +483,18 @@ impl Session {
                             && matches!(record.record_type(), RecordType::NSEC | RecordType::NSEC3)
                     });
                     if denial {
+                        push(
+                            details,
+                            FindingKind::DenialVerified,
+                            format!("{name} {kind}"),
+                        );
                         return chain;
                     }
-                    push(details, format!("{name} {kind} · No complete proof"));
+                    push(
+                        details,
+                        FindingKind::ProofUnavailable,
+                        format!("{name} {kind}"),
+                    );
                     return Verdict::Unavailable;
                 }
                 if record_type == kind && raw.metadata.response_code != ResponseCode::NoError {
@@ -504,7 +534,7 @@ impl Session {
         name: &Name,
         kind: RecordType,
         records: &[&Record],
-        details: &mut Vec<String>,
+        details: &mut Vec<Finding>,
     ) -> Verdict {
         if let Some(signature) = verified_signature(&response.answers, name, kind)
             && records.iter().all(|raw_record| {
@@ -516,12 +546,19 @@ impl Session {
             })
         {
             let input = signature.input();
-            push(
+            push_finding(
                 details,
-                format!(
-                    "{name} {kind} · Verified RRSIG from {} · key {} ({:?})",
-                    input.signer_name, input.key_tag, input.algorithm
-                ),
+                Finding {
+                    kind: FindingKind::RecordVerified,
+                    answer: Some((
+                        name.clone(),
+                        records.iter().map(|r| r.data.clone()).collect(),
+                    )),
+                    subject: format!(
+                        "{name} {kind} · {} key {}",
+                        input.signer_name, input.key_tag
+                    ),
+                },
             );
             self.zone(&input.signer_name, details).await;
             return Verdict::Validated;
@@ -536,11 +573,21 @@ impl Session {
             && matches!(kind, RecordType::A | RecordType::AAAA)
             && raw.metadata.response_code == ResponseCode::NoError
         {
-            let apex = self.zone(name, details).await;
+            let mut apex_details = Vec::new();
+            let apex = self.zone(name, &mut apex_details).await;
+            for finding in apex_details {
+                if apex.signed_delegation
+                    || apex.unsigned
+                    || finding.kind == FindingKind::KeysPublished
+                {
+                    push(details, finding.kind, finding.subject);
+                }
+            }
             if apex.signed_delegation {
                 push(
                     details,
-                    format!("{name} {kind} · Required RRSIG was absent"),
+                    FindingKind::MissingSignature,
+                    format!("{name} {kind}"),
                 );
                 return Verdict::MissingSignature;
             }
@@ -589,9 +636,8 @@ impl Session {
             if all_invalid {
                 push(
                     details,
-                    format!(
-                        "{name} {kind} · RRSIG did not verify with the matching authenticated keys"
-                    ),
+                    FindingKind::InvalidSignature,
+                    format!("{name} {kind}"),
                 );
                 return Verdict::Failed;
             }
@@ -614,7 +660,11 @@ impl Session {
         {
             return Verdict::Unsigned;
         }
-        push(details, format!("{name} {kind} · Proof unavailable"));
+        push(
+            details,
+            FindingKind::ProofUnavailable,
+            format!("{name} {kind}"),
+        );
         Verdict::Unavailable
     }
 }
@@ -631,7 +681,16 @@ pub(crate) async fn inspect(server: Server, name: String) -> Report {
     let ipv4 = session
         .family(name.clone(), RecordType::A, &mut details)
         .await;
-    let ipv6 = session.family(name, RecordType::AAAA, &mut details).await;
+    let ipv6 = session
+        .family(name.clone(), RecordType::AAAA, &mut details)
+        .await;
+    if details.is_empty() {
+        push(
+            &mut details,
+            FindingKind::ProofUnavailable,
+            name.to_string(),
+        );
+    }
     Report {
         verdict: combine(ipv4, ipv6),
         details,
@@ -649,9 +708,9 @@ pub(crate) async fn inspect_configured(address: SocketAddr, name: String) -> Con
     }
 }
 
-pub(crate) async fn observe(address: SocketAddr, name: String) -> Vec<String> {
+async fn observe(address: SocketAddr, name: String) -> Vec<Finding> {
     let Ok(name) = Name::from_ascii(name) else {
-        return vec!["DnsSec not available".into()];
+        return unavailable("Invalid DNS name").details;
     };
     let (ipv4, ipv6) = tokio::join!(
         observe_family(address, name.clone(), RecordType::A),
@@ -659,12 +718,12 @@ pub(crate) async fn observe(address: SocketAddr, name: String) -> Vec<String> {
     );
     let mut details = ipv4;
     for line in ipv6 {
-        push(&mut details, line);
+        push_finding(&mut details, line);
     }
     details
 }
 
-async fn observe_family(address: SocketAddr, mut name: Name, kind: RecordType) -> Vec<String> {
+async fn observe_family(address: SocketAddr, mut name: Name, kind: RecordType) -> Vec<Finding> {
     let mut details = Vec::new();
     let mut seen = BTreeSet::new();
     let deadline = Instant::now() + Duration::from_secs(6);
@@ -720,11 +779,11 @@ async fn observe_family(address: SocketAddr, mut name: Name, kind: RecordType) -
                         })
                 });
                 let status = if signed_denial {
-                    "Signed denial material returned"
+                    FindingKind::SignedDenialReturned
                 } else {
-                    "No address records or covering signatures returned"
+                    FindingKind::NoRecordsReturned
                 };
-                push(&mut details, format!("{name} {kind} · {status}"));
+                push(&mut details, status, format!("{name} {kind}"));
                 return details;
             };
             let rr_type = record.record_type();
@@ -740,11 +799,28 @@ async fn observe_family(address: SocketAddr, mut name: Name, kind: RecordType) -
                     .iter()
                     .any(|record| covering(record, &name, rr_type).is_some());
                 let status = if signed {
-                    "Signatures returned"
+                    FindingKind::SignaturesReturned
                 } else {
-                    "No signatures returned"
+                    FindingKind::NoSignaturesReturned
                 };
-                push(&mut details, format!("{name} {rr_type} · {status}"));
+                let answer = (!signed).then(|| {
+                    (
+                        name.clone(),
+                        raw.answers
+                            .iter()
+                            .filter(|r| relevant(r, &name, rr_type))
+                            .map(|r| r.data.clone())
+                            .collect(),
+                    )
+                });
+                push_finding(
+                    &mut details,
+                    Finding {
+                        kind: status,
+                        subject: format!("{name} {rr_type}"),
+                        answer,
+                    },
+                );
             }
             let RData::CNAME(alias) = &record.data else {
                 return details;
@@ -752,7 +828,8 @@ async fn observe_family(address: SocketAddr, mut name: Name, kind: RecordType) -
             if seen.contains(&alias.0) || seen.len() >= MAX_STEPS {
                 push(
                     &mut details,
-                    format!("{name} {kind} · DnsSec not available"),
+                    FindingKind::ProofUnavailable,
+                    format!("{name} {kind}"),
                 );
                 return details;
             }
@@ -767,7 +844,8 @@ async fn observe_family(address: SocketAddr, mut name: Name, kind: RecordType) -
     }
     push(
         &mut details,
-        format!("{name} {kind} · DnsSec not available"),
+        FindingKind::ProofUnavailable,
+        format!("{name} {kind}"),
     );
     details
 }
@@ -775,7 +853,11 @@ async fn observe_family(address: SocketAddr, mut name: Name, kind: RecordType) -
 fn unavailable(reason: &str) -> Report {
     Report {
         verdict: Verdict::Unavailable,
-        details: vec![reason.into()],
+        details: vec![Finding {
+            kind: FindingKind::ProofUnavailable,
+            subject: reason.into(),
+            answer: None,
+        }],
     }
 }
 
@@ -790,9 +872,20 @@ fn combine(left: Verdict, right: Verdict) -> Verdict {
     }
 }
 
-fn push(details: &mut Vec<String>, line: String) {
-    if !details.contains(&line) {
-        details.push(line);
+fn push(details: &mut Vec<Finding>, kind: FindingKind, subject: String) {
+    push_finding(
+        details,
+        Finding {
+            kind,
+            subject,
+            answer: None,
+        },
+    );
+}
+
+fn push_finding(details: &mut Vec<Finding>, finding: Finding) {
+    if !details.contains(&finding) {
+        details.push(finding);
     }
 }
 
@@ -909,7 +1002,7 @@ mod tests {
                 report
                     .details
                     .iter()
-                    .any(|line| line.contains("DS matches DNSKEY")),
+                    .any(|finding| finding.kind == FindingKind::DelegationVerified),
                 "{:?}",
                 report.details
             );
@@ -917,7 +1010,7 @@ mod tests {
                 report
                     .details
                     .iter()
-                    .any(|line| line.contains("Verified RRSIG")),
+                    .any(|finding| finding.kind == FindingKind::RecordVerified),
                 "{:?}",
                 report.details
             );
