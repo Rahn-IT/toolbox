@@ -9,7 +9,7 @@ use iced::{
 use crate::action::Action;
 use crate::{
     Module, device_scan, encoder, mailbox_scanner, network_scanner, nut, path_length_checker,
-    search, wake_on_lan,
+    search, spelling_alphabet, wake_on_lan,
 };
 #[cfg(windows)]
 use crate::{quick_install, quick_tools};
@@ -28,6 +28,7 @@ pub enum Message {
 pub enum TabMessage {
     Search(search::Message),
     Encoder(encoder::Message),
+    SpellingAlphabet(spelling_alphabet::Message),
     PathLengthChecker(path_length_checker::Message),
     Nut(nut::Message),
     WakeOnLan(wake_on_lan::Message),
@@ -269,6 +270,10 @@ impl TabManager {
             (Module::Encoder(state), TabMessage::Encoder(message)) => {
                 state.update(message).map(TabMessage::Encoder)
             }
+            (Module::SpellingAlphabet(state), TabMessage::SpellingAlphabet(message)) => {
+                state.update(message);
+                Action::None
+            }
             (Module::PathLengthChecker(state), TabMessage::PathLengthChecker(message)) => {
                 state.update(message).map(TabMessage::PathLengthChecker)
             }
@@ -391,6 +396,7 @@ impl Module {
         match self {
             Self::Search(_) => search::State::TITLE,
             Self::Encoder(state) => state.title(),
+            Self::SpellingAlphabet(_) => spelling_alphabet::State::TITLE,
             Self::PathLengthChecker(_) => path_length_checker::PathLengthChecker::TITLE,
             Self::Nut(_) => nut::Nut::TITLE,
             Self::WakeOnLan(_) => wake_on_lan::State::TITLE,
@@ -410,6 +416,7 @@ impl Module {
                 search::State::view_query(query, selected_result).map(TabMessage::Search)
             }
             Self::Encoder(state) => state.view().map(TabMessage::Encoder),
+            Self::SpellingAlphabet(state) => state.view().map(TabMessage::SpellingAlphabet),
             Self::PathLengthChecker(state) => state.view().map(TabMessage::PathLengthChecker),
             Self::Nut(state) => state.view().map(TabMessage::Nut),
             Self::WakeOnLan(state) => state.view().map(TabMessage::WakeOnLan),
