@@ -398,6 +398,13 @@ impl State {
             .or_else(|| self.observed_protocol())
     }
 
+    fn uses_tls(&self) -> bool {
+        matches!(
+            self.protocol_for_follow_up(),
+            Some(protocol_detection::Detected::Tls(_))
+        )
+    }
+
     fn http_scheme(&self) -> Option<bool> {
         use protocol_detection::{Application, Detected};
         match self.protocol {
@@ -443,18 +450,21 @@ impl State {
                 ("Detected Protocol", self.protocol_view()),
                 (
                     "TLS Handshake",
-                    self.tls.view().map(|view| {
-                        row![
-                            view.map(Message::PortConnectivity),
-                            space::horizontal(),
-                            self.tls.certificates().map(|_| {
-                                button("Show Certificates").on_press(Message::ShowCertificates)
-                            }),
-                        ]
-                        .spacing(12)
-                        .align_y(Alignment::Center)
-                        .into()
-                    }),
+                    self.uses_tls()
+                        .then(|| self.tls.view())
+                        .flatten()
+                        .map(|view| {
+                            row![
+                                view.map(Message::PortConnectivity),
+                                space::horizontal(),
+                                self.tls.certificates().map(|_| {
+                                    button("Show Certificates").on_press(Message::ShowCertificates)
+                                }),
+                            ]
+                            .spacing(12)
+                            .align_y(Alignment::Center)
+                            .into()
+                        }),
                 ),
             ],
         )
@@ -502,11 +512,16 @@ mod tests {
         };
         assert_eq!(state.observed_protocol(), Some(ssh));
         assert_eq!(state.protocol_for_follow_up(), Some(https));
+        assert!(state.uses_tls());
         assert!(ssh.conflicts_with(https));
         assert!(!tls.conflicts_with(https));
         assert!(!https.conflicts_with(tls));
         state.protocol = None;
         assert_eq!(state.protocol_for_follow_up(), Some(ssh));
+        assert!(!state.uses_tls());
+        state.passive_result = Check::Complete(None);
+        state.active_result = Check::Complete(Some(tls));
+        assert!(state.uses_tls());
     }
 
     #[test]
