@@ -3,6 +3,7 @@ mod check_view;
 mod local_link;
 mod name_resolution;
 mod port_connectivity;
+mod protocol_detection;
 mod tls;
 
 use std::{fmt, net::IpAddr, num::NonZeroU16};
@@ -76,8 +77,8 @@ pub struct State {
     host: String,
     port: String,
     protocol: Option<Protocol>,
-    #[allow(dead_code, reason = "Reserved for protocol detection.")]
-    detected_protocol: Option<Protocol>,
+    passive_result: protocol_detection::Check,
+    active_result: protocol_detection::Check,
     target_ip: Option<IpAddr>,
     resolver: name_resolution::Resolver,
     local_link: local_link::State,
@@ -124,7 +125,7 @@ impl State {
                     self.resolver = name_resolution::Resolver::default();
                     self.local_link = local_link::State::default();
                     self.port_connectivity = port_connectivity::State::default();
-                    self.tls = tls::State::default();
+                    self.reset_protocol_checks();
                 }
                 return Task::none();
             }
@@ -138,14 +139,11 @@ impl State {
                         self.protocol = current.map(Protocol::for_port);
                     }
                     self.port_connectivity = port_connectivity::State::default();
-                    self.tls = tls::State::default();
+                    self.reset_protocol_checks();
                 }
                 return Task::none();
             }
-            Message::ProtocolSelected(protocol) if !self.certificate_overlay.open => {
-                if self.protocol != Some(protocol) && !self.is_running() {
-                    self.tls = tls::State::default();
-                }
+            Message::ProtocolSelected(protocol) if self.can_edit() => {
                 self.protocol = Some(protocol);
                 return Task::none();
             }
@@ -157,19 +155,34 @@ impl State {
                     port_connectivity::State::Disabled,
                     port_connectivity::State::Waiting,
                 );
-                self.tls = tls::State::new(self.host.trim(), self.protocol);
+                self.reset_protocol_checks();
                 self.resolver
                     .update(name_resolution::Message::Start(self.host.trim().into()));
             }
             Message::Resolution(message) => self.resolver.update(message),
             Message::LocalLink(message) => self.local_link.update(message),
-            Message::PortConnectivity(port_connectivity::Message::TlsFinished(report)) => {
-                self.tls.finish(report);
-            }
             Message::PortConnectivity(message) => {
-                self.port_connectivity.update(message);
-                if self.port_connectivity.connected() {
-                    self.tls.start();
+                use port_connectivity::Message as CheckMessage;
+                use protocol_detection::Check;
+                match message {
+                    CheckMessage::Finished(port_connectivity::Outcome::Connected) => {
+                        self.port_connectivity.update(message);
+                        if self.port_connectivity.connected() {
+                            self.passive_result = Check::Checking;
+                        }
+                    }
+                    CheckMessage::PassiveFinished(detected) => {
+                        self.passive_result = Check::Complete(detected);
+                        if detected.is_none() {
+                            self.active_result = Check::Checking;
+                        }
+                    }
+                    CheckMessage::TlsStarted => self.tls.start(),
+                    CheckMessage::TlsFinished(report) => self.tls.finish(report),
+                    CheckMessage::ActiveFinished(detected) => {
+                        self.active_result = Check::Complete(detected);
+                    }
+                    _ => self.port_connectivity.update(message),
                 }
             }
             Message::Analyse
@@ -180,6 +193,12 @@ impl State {
             }
         }
         self.next_checks()
+    }
+
+    fn reset_protocol_checks(&mut self) {
+        self.passive_result = protocol_detection::Check::Skipped;
+        self.active_result = protocol_detection::Check::Skipped;
+        self.tls = tls::State::default();
     }
 
     fn next_checks(&mut self) -> Task<Message> {
@@ -194,7 +213,7 @@ impl State {
         let link = self.local_link.next_checks().map(Message::LocalLink);
         let port = self
             .port_connectivity
-            .next_checks(self.tls.request())
+            .next_checks(self.host.trim())
             .map(Message::PortConnectivity);
 
         // Claim ready checks before returning to iced, where other checks may finish.
@@ -210,7 +229,13 @@ impl State {
         self.resolver.is_running()
             || self.local_link.is_running()
             || self.port_connectivity.is_running()
-            || self.tls.is_running()
+            || self.protocol_check_running()
+    }
+
+    fn protocol_check_running(&self) -> bool {
+        use protocol_detection::Check;
+        matches!(self.passive_result, Check::Checking)
+            || matches!(self.active_result, Check::Checking)
     }
 
     fn can_analyse(&self) -> bool {
@@ -311,6 +336,50 @@ impl State {
         }
     }
 
+    fn protocol_view(&self) -> Option<Element<'_, Message>> {
+        use protocol_detection::Check;
+        if self.protocol_check_running() {
+            return Some(check_view::checking());
+        }
+        if matches!(self.passive_result, Check::Skipped) {
+            return None;
+        }
+        let Some(detected) = self.observed_protocol() else {
+            return Some(text("Inconclusive").into());
+        };
+        let label = detected.to_string();
+        let protocol = match self
+            .protocol
+            .and_then(|selected| detected.comparison(selected))
+        {
+            Some(matches) => check_view::badge(label, matches),
+            None => text(label).into(),
+        };
+        Some(
+            row![
+                protocol,
+                self.protocol_for_follow_up()
+                    .is_some_and(|expected| detected.conflicts_with(expected))
+                    .then(|| { check_view::badge("Protocol mismatch", false) }),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+        )
+    }
+
+    fn observed_protocol(&self) -> Option<protocol_detection::Detected> {
+        self.passive_result
+            .detected()
+            .or_else(|| self.active_result.detected())
+    }
+
+    fn protocol_for_follow_up(&self) -> Option<protocol_detection::Detected> {
+        self.protocol
+            .and_then(protocol_detection::Detected::from_selection)
+            .or_else(|| self.observed_protocol())
+    }
+
     fn connectivity_view(&self) -> Option<Element<'_, Message>> {
         let target = self.target_ip?;
         let target = self
@@ -338,6 +407,7 @@ impl State {
                         .view()
                         .map(|view| view.map(Message::PortConnectivity)),
                 ),
+                ("Protocol", self.protocol_view()),
                 (
                     "TLS Handshake",
                     self.tls.view().map(|view| {
@@ -363,24 +433,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tls_becomes_visible_only_after_tcp_succeeds_for_an_explicit_tls_protocol() {
-        for (protocol, should_check_tls) in [
-            (Protocol::Tls, true),
-            (Protocol::Https, true),
-            (Protocol::Http, false),
-            (Protocol::Autodetect, false),
-            (Protocol::Unknown, false),
-        ] {
+    fn preference_keeps_explicit_selection_and_observation_independent() {
+        use protocol_detection::{Application, Check, Detected};
+
+        let ssh = Detected::Plain(Application::Ssh);
+        let https = Detected::Tls(Some(Application::Http));
+        let tls = Detected::Tls(None);
+        let mut state = State {
+            protocol: Some(Protocol::Https),
+            passive_result: Check::Complete(Some(ssh)),
+            ..State::default()
+        };
+        assert_eq!(state.observed_protocol(), Some(ssh));
+        assert_eq!(state.protocol_for_follow_up(), Some(https));
+        assert!(ssh.conflicts_with(https));
+        assert!(!tls.conflicts_with(https));
+        assert!(!https.conflicts_with(tls));
+        state.protocol = Some(Protocol::Unknown);
+        assert_eq!(state.protocol_for_follow_up(), Some(ssh));
+    }
+
+    #[test]
+    fn protocol_discovery_runs_after_tcp_for_every_selection() {
+        for protocol in Protocol::ALL {
             let mut state = State::default();
             let _ = state.update(Message::HostEdited("192.0.2.1".into()));
             let _ = state.update(Message::PortEdited("443".into()));
             let _ = state.update(Message::ProtocolSelected(protocol));
             let _ = state.update(Message::Analyse);
             assert!(state.tls.view().is_none());
+            assert!(state.protocol_view().is_none());
             let _ = state.update(Message::PortConnectivity(
                 port_connectivity::Message::Finished(port_connectivity::Outcome::Connected),
             ));
-            assert_eq!(state.tls.view().is_some(), should_check_tls);
+            assert!(state.protocol_check_running());
+            assert!(state.protocol_view().is_some());
+            assert!(state.tls.view().is_none());
+            let _ = state.update(Message::PortConnectivity(
+                port_connectivity::Message::PassiveFinished(None),
+            ));
+            let _ = state.update(Message::PortConnectivity(
+                port_connectivity::Message::TlsStarted,
+            ));
+            assert!(state.tls.view().is_some());
+            assert!(state.protocol_check_running());
+            let _ = state.update(Message::PortConnectivity(
+                port_connectivity::Message::ActiveFinished(None),
+            ));
+            assert!(!state.protocol_check_running());
         }
     }
 

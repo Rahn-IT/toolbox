@@ -3,7 +3,10 @@ use iced::{
     widget::{column, container, row, rule, text, tooltip},
 };
 
-pub(super) fn badge<'a, Message: 'a>(label: &'a str, positive: bool) -> Element<'a, Message> {
+pub(super) fn badge<'a, Message: 'a>(
+    label: impl text::IntoFragment<'a>,
+    positive: bool,
+) -> Element<'a, Message> {
     let background = if positive {
         color!(0x167344)
     } else {

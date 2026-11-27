@@ -1,14 +1,15 @@
 use std::{
     net::IpAddr,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use hickory_client::proto::rr::Name;
 use iced::{Alignment, Element, widget::row};
-use tokio::net::TcpStream;
+use tokio::{net::TcpStream, time::Instant};
 use tokio_rustls::{
-    TlsConnector, rustls,
+    TlsConnector,
+    client::TlsStream,
+    rustls,
     rustls::{
         CertificateError, DigitallySignedStruct, SignatureScheme,
         client::{
@@ -21,26 +22,24 @@ use tokio_rustls::{
 use x509_parser::certificate::X509Certificate;
 
 use super::{
-    Protocol,
     check_view::{badge, checking},
     port_connectivity::Message,
 };
 
-#[derive(Clone)]
-pub(super) struct Request {
-    host: String,
-    https: bool,
-}
-
-impl Request {
-    fn server_name(&self) -> Result<ServerName<'static>, String> {
-        if let Ok(ip) = self.host.trim_matches(['[', ']']).parse::<IpAddr>() {
-            return Ok(ip.into());
-        }
-        let name = Name::from_utf8(&self.host).map_err(|error| error.to_string())?;
-        ServerName::try_from(name.to_ascii().trim_end_matches('.').to_owned())
-            .map_err(|error| error.to_string())
+pub(super) fn server_name(host: &str) -> Result<ServerName<'static>, String> {
+    if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
+        return Ok(ip.into());
     }
+    let name = Name::from_utf8(host).map_err(|error| error.to_string())?;
+    let ascii = name.to_ascii();
+    let ascii = ascii.trim_end_matches('.');
+    if !ascii
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.'))
+    {
+        return Err("Invalid hostname".into());
+    }
+    ServerName::try_from(ascii.to_owned()).map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Default)]
@@ -53,37 +52,20 @@ pub struct PresentedCertificate {
 pub struct Report {
     pub presented: PresentedCertificate,
     handshake: Result<(), String>,
+    pub peer_alert: bool,
 }
 
 #[derive(Default)]
 pub(super) enum State {
     #[default]
     Disabled,
-    Waiting(Request),
     Checking,
     Complete(Report),
 }
 
 impl State {
-    pub fn new(host: &str, protocol: Option<Protocol>) -> Self {
-        match protocol {
-            Some(Protocol::Tls | Protocol::Https) => Self::Waiting(Request {
-                host: host.into(),
-                https: protocol == Some(Protocol::Https),
-            }),
-            _ => Self::Disabled,
-        }
-    }
-
-    pub fn request(&self) -> Option<Request> {
-        match self {
-            Self::Waiting(request) => Some(request.clone()),
-            _ => None,
-        }
-    }
-
     pub fn start(&mut self) {
-        if matches!(self, Self::Waiting(_)) {
+        if matches!(self, Self::Disabled) {
             *self = Self::Checking;
         }
     }
@@ -92,10 +74,6 @@ impl State {
         if matches!(self, Self::Checking) {
             *self = Self::Complete(report);
         }
-    }
-
-    pub fn is_running(&self) -> bool {
-        matches!(self, Self::Checking)
     }
 
     pub fn certificates(&self) -> Option<&[CertificateDer<'static>]> {
@@ -112,9 +90,9 @@ impl State {
             Self::Checking => checking(),
             Self::Complete(report) => {
                 let status = match (&report.handshake, &report.presented.verification) {
-                    (Ok(()), _) => badge("Verified", true),
                     (_, Some(Err(error))) => badge(verification_failure(error), false),
-                    (Err(_), _) => badge("TLS failed", false),
+                    (Ok(()), Some(Ok(()))) => badge("Verified", true),
+                    _ => badge("TLS failed", false),
                 };
                 let self_signed = report.presented.certificates.first().is_some_and(|der| {
                     x509_parser::parse_x509_certificate(der.as_ref())
@@ -153,27 +131,41 @@ fn verification_failure(error: &rustls::Error) -> &'static str {
     }
 }
 
-pub(super) async fn inspect(stream: TcpStream, request: Request) -> Report {
+pub(super) async fn inspect(
+    stream: TcpStream,
+    name: ServerName<'static>,
+    deadline: Instant,
+) -> (Report, Option<TlsStream<TcpStream>>) {
     let presented = Arc::new(Mutex::new(PresentedCertificate::default()));
-    let handshake = handshake(stream, request, Arc::clone(&presented)).await;
+    let result = handshake(stream, name, Arc::clone(&presented), deadline).await;
     let presented =
         std::mem::take(&mut *presented.lock().unwrap_or_else(|error| error.into_inner()));
-    Report {
+    let peer_alert = result.as_ref().err().is_some_and(|error| {
+        matches!(
+            error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<rustls::Error>()),
+            Some(rustls::Error::AlertReceived(_))
+        )
+    });
+    let report = Report {
         presented,
-        handshake,
-    }
+        handshake: result.as_ref().map(|_| ()).map_err(ToString::to_string),
+        peer_alert,
+    };
+    (report, result.ok())
 }
 
 async fn handshake(
     stream: TcpStream,
-    request: Request,
+    server_name: ServerName<'static>,
     presented: Arc<Mutex<PresentedCertificate>>,
-) -> Result<(), String> {
-    let server_name = request.server_name()?;
+    deadline: Instant,
+) -> std::io::Result<TlsStream<TcpStream>> {
     let roots = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let verifier = WebPkiServerVerifier::builder(Arc::new(roots))
         .build()
-        .map_err(|error| error.to_string())?;
+        .map_err(std::io::Error::other)?;
     let verifier = Arc::new(CaptureVerifier {
         verifier,
         presented,
@@ -182,18 +174,11 @@ async fn handshake(
         .dangerous()
         .with_custom_certificate_verifier(verifier)
         .with_no_client_auth();
-    if request.https {
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    }
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     let connector = TlsConnector::from(Arc::new(config));
-    tokio::time::timeout(
-        Duration::from_secs(5),
-        connector.connect(server_name, stream),
-    )
-    .await
-    .map_err(|_| "TLS handshake timed out".to_owned())?
-    .map(|_| ())
-    .map_err(|error| error.to_string())
+    tokio::time::timeout_at(deadline, connector.connect(server_name, stream))
+        .await
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::TimedOut))?
 }
 
 struct CaptureVerifier {
@@ -230,7 +215,9 @@ impl ServerCertVerifier for CaptureVerifier {
             .map(|cert| cert.clone().into_owned())
             .collect();
         presented.verification = Some(result.as_ref().map(|_| ()).map_err(Clone::clone));
-        result
+        // This connector only detects the protocol at the selected endpoint.
+        // Keep WebPKI's trust result for the UI and verify handshake signatures normally.
+        Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
@@ -260,10 +247,12 @@ impl ServerCertVerifier for CaptureVerifier {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
-    fn keeps_the_chain_when_webpki_rejects_it() {
+    fn permits_detection_and_records_the_chain_when_webpki_rejects_it() {
         let roots =
             rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let presented = Arc::new(Mutex::new(PresentedCertificate::default()));
@@ -276,12 +265,17 @@ mod tests {
         let leaf = CertificateDer::from(vec![1, 2, 3]);
         let intermediate = CertificateDer::from(vec![4, 5, 6]);
         let name = ServerName::try_from("example.com").unwrap();
-        let error = verifier
-            .verify_server_cert(&leaf, &[intermediate.clone()], &name, &[], UnixTime::now())
-            .unwrap_err();
+        assert!(
+            verifier
+                .verify_server_cert(&leaf, &[intermediate.clone()], &name, &[], UnixTime::now())
+                .is_ok()
+        );
         let presented = presented.lock().unwrap();
         assert_eq!(presented.certificates, [leaf, intermediate]);
-        assert_eq!(presented.verification, Some(Err(error)));
+        assert!(matches!(
+            presented.verification,
+            Some(Err(rustls::Error::InvalidCertificate(_)))
+        ));
     }
 
     #[tokio::test]
@@ -294,10 +288,8 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        let request = State::new("example.com", Some(Protocol::Https))
-            .request()
-            .unwrap();
-        let report = inspect(stream, request).await;
+        let name = server_name("example.com").unwrap();
+        let (report, _) = inspect(stream, name, Instant::now() + Duration::from_secs(5)).await;
         assert_eq!(report.handshake, Ok(()));
         assert_eq!(report.presented.verification, Some(Ok(())));
         assert!(!report.presented.certificates.is_empty());

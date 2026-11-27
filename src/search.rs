@@ -78,7 +78,14 @@ const TOOLS: &[Tool] = &[
         analyse_connection::State::TITLE,
         analyse_connection::State::new,
     )
-    .keywords(&["connection diagnostics", "http", "https", "tls"]),
+    .keywords(&[
+        "connection diagnostics",
+        "connection test",
+        "firewall",
+        "http",
+        "https",
+        "tls",
+    ]),
     Tool::new(dns_cache::State::TITLE, dns_cache::State::new).keywords(&[
         "displaydns",
         "resolvectl",
@@ -92,7 +99,7 @@ const TOOLS: &[Tool] = &[
         path_length_checker::PathLengthChecker::TITLE,
         path_length_checker::PathLengthChecker::new,
     )
-    .keywords(&["long paths", "max_path"]),
+    .keywords(&["long paths", "max_path", "path length test"]),
     Tool::new(nut::Nut::TITLE, nut::Nut::new).keywords(&["ups", "network ups tools"]),
     Tool::new(wake_on_lan::State::TITLE, wake_on_lan::State::new)
         .keywords(&["wol", "magic packet"]),
@@ -100,6 +107,7 @@ const TOOLS: &[Tool] = &[
         "lan scanner",
         "device discovery",
         "ping sweep",
+        "port test",
     ]),
     Tool::new(mailbox_scanner::App::TITLE, mailbox_scanner::App::new)
         .keywords(&["imap", "email scanner"]),
