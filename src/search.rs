@@ -22,6 +22,7 @@ pub(crate) const INPUT_ID: &str = "tool-search";
 
 struct Tool {
     title: &'static str,
+    keywords: &'static [&'static str],
     open: fn() -> OpenedModule,
     requires_admin: bool,
 }
@@ -30,9 +31,15 @@ impl Tool {
     const fn new(title: &'static str, open: fn() -> OpenedModule) -> Self {
         Self {
             title,
+            keywords: &[],
             open,
             requires_admin: false,
         }
+    }
+
+    const fn keywords(mut self, keywords: &'static [&'static str]) -> Self {
+        self.keywords = keywords;
+        self
     }
 
     #[cfg(windows)]
@@ -54,31 +61,42 @@ impl Tool {
 
 const TOOLS: &[Tool] = &[
     #[cfg(windows)]
-    Tool::new(QuickInstall::TITLE, QuickInstall::new),
-    Tool::new(Encoding::Eml.title(), || Encoder::new(Encoding::Eml)),
-    Tool::new(Encoding::Base64.title(), || Encoder::new(Encoding::Base64)),
+    Tool::new(QuickInstall::TITLE, QuickInstall::new).keywords(&["software", "applications"]),
+    Tool::new(Encoding::Eml.title(), || Encoder::new(Encoding::Eml))
+        .keywords(&["quoted-printable", "decode"]),
+    Tool::new(Encoding::Base64.title(), || Encoder::new(Encoding::Base64)).keywords(&["decode"]),
     Tool::new(Encoding::Unicode.title(), || {
         Encoder::new(Encoding::Unicode)
-    }),
+    })
+    .keywords(&["code points", "decode"]),
     Tool::new(
         spelling_alphabet::State::TITLE,
         spelling_alphabet::State::new,
-    ),
+    )
+    .keywords(&["phonetic", "nato", "buchstabieralphabet"]),
     Tool::new(
         path_length_checker::PathLengthChecker::TITLE,
         path_length_checker::PathLengthChecker::new,
-    ),
-    Tool::new(nut::Nut::TITLE, nut::Nut::new),
-    Tool::new(wake_on_lan::State::TITLE, wake_on_lan::State::new),
-    Tool::new(network_scanner::State::TITLE, network_scanner::State::new),
-    Tool::new(mailbox_scanner::App::TITLE, mailbox_scanner::App::new),
+    )
+    .keywords(&["long paths", "max_path"]),
+    Tool::new(nut::Nut::TITLE, nut::Nut::new).keywords(&["ups", "network ups tools"]),
+    Tool::new(wake_on_lan::State::TITLE, wake_on_lan::State::new)
+        .keywords(&["wol", "magic packet"]),
+    Tool::new(network_scanner::State::TITLE, network_scanner::State::new).keywords(&[
+        "lan scanner",
+        "device discovery",
+        "ping sweep",
+    ]),
+    Tool::new(mailbox_scanner::App::TITLE, mailbox_scanner::App::new)
+        .keywords(&["imap", "email scanner"]),
     #[cfg(windows)]
-    Tool::new(adwcleaner::TITLE, adwcleaner::new),
+    Tool::new(adwcleaner::TITLE, adwcleaner::new).keywords(&["adware", "malwarebytes"]),
     #[cfg(windows)]
     Tool::new(
         clear_default_extensions::TITLE,
         clear_default_extensions::new,
     )
+    .keywords(&["file associations", "default apps"])
     .admin_only(),
     #[cfg(windows)]
     Tool::new("Disable Hibernation", || {
@@ -89,9 +107,12 @@ const TOOLS: &[Tool] = &[
             "Hibernation disabled (powercfg -h off).",
         )
     })
+    .keywords(&["hibernate", "hiberfil"])
     .admin_only(),
     #[cfg(windows)]
-    Tool::new(restart_print_spooler::TITLE, restart_print_spooler::new).admin_only(),
+    Tool::new(restart_print_spooler::TITLE, restart_print_spooler::new)
+        .keywords(&["printer", "print queue"])
+        .admin_only(),
     #[cfg(windows)]
     Tool::new("Flush DNS Cache", || {
         run_windows_command::new(
@@ -100,11 +121,12 @@ const TOOLS: &[Tool] = &[
             &["/flushdns"],
             "DNS resolver cache flushed.",
         )
-    }),
+    })
+    .keywords(&["ipconfig", "flushdns"]),
     #[cfg(windows)]
-    Tool::new(set_power_config::TITLE, set_power_config::new),
+    Tool::new(set_power_config::TITLE, set_power_config::new).keywords(&["power plan", "powercfg"]),
     #[cfg(windows)]
-    Tool::new(temp_files::TITLE, temp_files::new),
+    Tool::new(temp_files::TITLE, temp_files::new).keywords(&["temporary files", "disk cleanup"]),
 ];
 
 #[derive(Clone)]
@@ -277,10 +299,10 @@ fn available_results(query: &str) -> impl Iterator<Item = Message> {
 
 fn matching_tools(query: &str) -> impl Iterator<Item = (usize, &'static Tool)> {
     let query = query.trim().to_ascii_lowercase();
-    TOOLS
-        .iter()
-        .enumerate()
-        .filter(move |(_, tool)| tool.title.to_ascii_lowercase().contains(&query))
+    TOOLS.iter().enumerate().filter(move |(_, tool)| {
+        tool.title.to_ascii_lowercase().contains(&query)
+            || tool.keywords.iter().any(|keyword| keyword.contains(&query))
+    })
 }
 
 fn result_style(theme: &Theme, status: button::Status, selected: bool) -> button::Style {
@@ -296,6 +318,15 @@ fn result_style(theme: &Theme, status: button::Status, selected: bool) -> button
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn searching_a_keyword_opens_the_matching_tool() {
+        let mut search = State::new("  NATO  ".into());
+        assert!(matches!(
+            search.update(Message::Submit),
+            Some((crate::Module::SpellingAlphabet(_), _))
+        ));
+    }
 
     #[test]
     fn entering_an_ipv4_address_opens_a_device_scan_as_the_first_result() {
