@@ -1,5 +1,6 @@
 mod certificate_overlay;
 mod check_view;
+mod gateway;
 mod http;
 mod local_link;
 mod name_resolution;
@@ -67,6 +68,7 @@ pub enum Message {
     Resolution(name_resolution::Message),
     LocalLink(local_link::Message),
     RouteFinished(Result<interfaces::RouteDetails, interfaces::Error>),
+    GatewayFinished(gateway::GatewayResult),
     PortConnectivity(port_connectivity::Message),
     HttpFinished(Result<http::Report, String>),
     ShowCertificates,
@@ -85,6 +87,7 @@ pub struct State {
     resolver: name_resolution::Resolver,
     local_link: local_link::State,
     route: Option<Result<interfaces::RouteDetails, interfaces::Error>>,
+    gateway: Option<gateway::Gateway>,
     port_connectivity: port_connectivity::State,
     tls: tls::State,
     http: http::State,
@@ -127,6 +130,7 @@ impl State {
                     self.host = host;
                     self.target_ip = None;
                     self.route = None;
+                    self.gateway = None;
                     self.resolver = name_resolution::Resolver::default();
                     self.local_link = local_link::State::default();
                     self.port_connectivity = port_connectivity::State::default();
@@ -159,6 +163,7 @@ impl State {
                 }
                 self.target_ip = None;
                 self.route = None;
+                self.gateway = None;
                 self.resolver = name_resolution::Resolver::default();
                 self.local_link = local_link::State::default();
                 self.port_connectivity = self.port_number().map_or(
@@ -175,7 +180,29 @@ impl State {
             }
             Message::Resolution(message) => self.resolver.update(message),
             Message::LocalLink(message) => self.local_link.update(message),
-            Message::RouteFinished(result) => self.route = Some(result),
+            Message::RouteFinished(result) => {
+                self.route = Some(result);
+                if let Some(Ok(route)) = &self.route
+                    && let Some(ip @ IpAddr::V4(_)) = route.gateway
+                    && route.source.is_ipv4()
+                {
+                    self.gateway = Some(gateway::Gateway {
+                        ip,
+                        source: route.source,
+                        interface: route.interface.clone(),
+                        result: None,
+                    });
+                    return Task::perform(
+                        gateway::Gateway::check(ip, route.source, route.interface.clone()),
+                        Message::GatewayFinished,
+                    );
+                }
+            }
+            Message::GatewayFinished(result) => {
+                if let Some(gateway) = &mut self.gateway {
+                    gateway.result = Some(result);
+                }
+            }
             Message::HttpFinished(report) => self.http = http::State::Complete(report),
             Message::PortConnectivity(message) => {
                 use port_connectivity::Message as CheckMessage;
@@ -261,6 +288,7 @@ impl State {
             || self.port_connectivity.is_running()
             || self.protocol_check_running()
             || self.http.is_running()
+            || self.gateway.as_ref().is_some_and(|g| g.result.is_none())
             || (self.target_ip.is_some() && self.route.is_none())
     }
 
@@ -501,14 +529,16 @@ impl State {
                 ]
                 .spacing(4)
                 .into(),
-                Some(
+                Some(if let Some(gateway) = &self.gateway {
+                    gateway.view(gateway.ip.to_string())
+                } else {
                     text(
                         route
                             .gateway
                             .map_or_else(|| "On-link".into(), |gateway| gateway.to_string()),
                     )
-                    .into(),
-                ),
+                    .into()
+                }),
             ),
             Some(Err(error)) => (
                 check_view::error_badge("Route unavailable", error.to_string()),
