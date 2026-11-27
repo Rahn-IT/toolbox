@@ -97,7 +97,7 @@ pub(super) fn discover(interface: interfaces::Interface) -> impl Sipper<Report, 
                             .acquire()
                             .await
                             .expect("the probe semaphore stays open");
-                        (ip, runner.echo(device, ip).await)
+                        (ip, runner.echo(Some(device), ip.into()).await)
                     }))
                     .buffer_unordered(PING_CONCURRENCY);
                     let mut first_error = None;
@@ -105,7 +105,7 @@ pub(super) fn discover(interface: interfaces::Interface) -> impl Sipper<Report, 
                     let mut rows = Vec::new();
                     while let Some((ip, outcome)) = replies.next().await {
                         match outcome {
-                            ping::Outcome::Reply => {
+                            ping::Outcome::Reply(_) => {
                                 let observation = Observation {
                                     ping_reply: Some(true),
                                     ..Observation::new(ip)

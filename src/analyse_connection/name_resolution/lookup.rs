@@ -28,14 +28,20 @@ pub(super) const GOOGLE: Server = Server::Https(
     "dns.google",
 );
 
-pub(super) async fn system(host: String) -> Result<BTreeSet<IpAddr>, String> {
+pub(super) async fn system(host: String) -> Result<Vec<IpAddr>, String> {
     let lookup = tokio::time::timeout(
         Duration::from_secs(3),
         tokio::net::lookup_host((host.as_str(), 0)),
     )
     .await;
     match lookup {
-        Ok(Ok(addresses)) => Ok(addresses.map(|address| address.ip()).collect()),
+        Ok(Ok(addresses)) => {
+            let mut seen = BTreeSet::new();
+            Ok(addresses
+                .map(|address| address.ip())
+                .filter(|ip| seen.insert(*ip))
+                .collect())
+        }
         Ok(Err(error)) => Err(error.to_string()),
         Err(_) => Err("Timed out".into()),
     }
@@ -110,6 +116,7 @@ pub struct DnsReport {
     pub(super) details: String,
     pub(super) dnssec: Option<DnssecWarning>,
     pub(super) nameservers: Vec<Name>,
+    pub(super) addresses: [Option<BTreeSet<IpAddr>>; 2],
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -130,10 +137,11 @@ type DnsReply = Result<(DnsResponse, Option<Authority>), String>;
 #[derive(Default)]
 struct AddressChain {
     aliases: Vec<String>,
-    addresses: Vec<String>,
+    addresses: Vec<IpAddr>,
     notes: Vec<String>,
     nameservers: Vec<Name>,
     answered: bool,
+    complete: bool,
     dnssec: Option<DnssecWarning>,
 }
 
@@ -178,6 +186,11 @@ where
     let dnssec = ipv4.dnssec.max(ipv6.dnssec);
     let no_addresses = ipv4.addresses.is_empty() && ipv6.addresses.is_empty();
     let no_notes = ipv4.notes.is_empty() && ipv6.notes.is_empty();
+    let addresses = [&ipv4, &ipv6].map(|chain| {
+        chain
+            .complete
+            .then(|| chain.addresses.iter().copied().collect())
+    });
     let mut lines = Vec::new();
     for line in ipv4
         .aliases
@@ -187,7 +200,13 @@ where
             [ipv4.addresses, ipv6.addresses]
                 .into_iter()
                 .filter(|addresses| !addresses.is_empty())
-                .map(|addresses| addresses.join(", ")),
+                .map(|addresses| {
+                    addresses
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }),
         )
         .chain(ipv4.notes)
         .chain(ipv6.notes)
@@ -211,6 +230,7 @@ where
             details,
             dnssec,
             nameservers,
+            addresses,
         })
     } else {
         Err(details)
@@ -272,10 +292,10 @@ where
             {
                 match record.data() {
                     RData::A(address) if kind == RecordType::A => {
-                        chain.addresses.push(address.to_string())
+                        chain.addresses.push(IpAddr::V4(address.0))
                     }
                     RData::AAAA(address) if kind == RecordType::AAAA => {
-                        chain.addresses.push(address.to_string())
+                        chain.addresses.push(IpAddr::V6(address.0))
                     }
                     RData::CNAME(alias) => target = Some(alias.0.clone()),
                     _ => {}
@@ -298,9 +318,11 @@ where
 
         if status == ResponseCode::NXDomain {
             chain.notes.push(status.to_string());
+            chain.complete = true;
             return chain;
         }
         if !chain.addresses.is_empty() || name == queried {
+            chain.complete = true;
             return chain;
         }
         reply = query(name.clone(), kind).await;

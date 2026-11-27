@@ -8,7 +8,7 @@ pub mod device_scan;
 pub mod interfaces;
 pub(crate) mod name_lookup;
 pub(crate) mod netbios;
-mod ping;
+pub(crate) mod ping;
 mod ports;
 mod scan;
 mod view;

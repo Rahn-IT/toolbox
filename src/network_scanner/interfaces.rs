@@ -65,6 +65,11 @@ pub(super) async fn list() -> Result<Vec<Interface>, Error> {
 
 #[cfg(windows)]
 pub(super) async fn verify_route(interface: &Interface) -> Result<(), Error> {
+    check_routes(interface, &windows_routes().await?)
+}
+
+#[cfg(windows)]
+async fn windows_routes() -> Result<String, Error> {
     const TOOL: &str = "route.exe";
     let path =
         crate::quick_tools::system::executable(TOOL).map_err(|details| Error::Unavailable {
@@ -73,7 +78,73 @@ pub(super) async fn verify_route(interface: &Interface) -> Result<(), Error> {
         })?;
     let mut command = Command::new(path);
     command.args(["print", "-4"]).creation_flags(0x0800_0000);
-    check_routes(interface, &read_output(command, TOOL).await?)
+    read_output(command, TOOL).await
+}
+
+#[cfg(windows)]
+pub(crate) async fn on_link(target: Ipv4Addr) -> Result<Option<Interface>, Error> {
+    let output = windows_routes().await?;
+    let routes = parse_routes(&output)?;
+    let Some(route) = best_route(&routes, target).filter(|route| route.on_link) else {
+        return Ok(None);
+    };
+    Ok(list()
+        .await?
+        .into_iter()
+        .find(|interface| interface.ip == route.source && interface.is_neighbor(target)))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) async fn on_link(target: Ipv4Addr) -> Result<Option<Interface>, Error> {
+    const TOOL: &str = "ip";
+    let mut command = Command::new(TOOL);
+    command
+        .args(["-4", "-o", "route", "get", &target.to_string()])
+        .env("LC_ALL", "C");
+    let output = read_output(command, TOOL).await?;
+    let Some((device, source)) = linux_on_link_route(&output)? else {
+        return Ok(None);
+    };
+    Ok(list().await?.into_iter().find(|interface| {
+        interface.name == device && interface.ip == source && interface.is_neighbor(target)
+    }))
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+pub(crate) async fn on_link(_target: Ipv4Addr) -> Result<Option<Interface>, Error> {
+    Err(Error::Unsupported)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+impl Interface {
+    fn is_neighbor(&self, target: Ipv4Addr) -> bool {
+        let mask = prefix_mask(self.prefix);
+        target != self.ip && (u32::from(target) & mask) == (u32::from(self.ip) & mask)
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_on_link_route(output: &str) -> Result<Option<(&str, Ipv4Addr)>, Error> {
+    const ERROR: Error = Error::Unrecognized { tool: "ip" };
+    let fields: Vec<_> = output.split_ascii_whitespace().collect();
+    if fields
+        .first()
+        .is_some_and(|field| matches!(*field, "local" | "broadcast" | "multicast"))
+        || fields.contains(&"via")
+    {
+        return Ok(None);
+    }
+    let value = |key| {
+        fields
+            .windows(2)
+            .find(|pair| pair[0] == key)
+            .map(|pair| pair[1])
+    };
+    let dev = value("dev").ok_or(ERROR)?;
+    let source = value("src")
+        .and_then(|value| value.parse().ok())
+        .ok_or(ERROR)?;
+    Ok(Some((dev, source)))
 }
 
 #[cfg(target_os = "linux")]
@@ -190,6 +261,16 @@ struct Route {
     prefix: u8,
     source: Ipv4Addr,
     on_link: bool,
+    metric: u32,
+}
+
+#[cfg(any(windows, test))]
+fn best_route(routes: &[Route], target: Ipv4Addr) -> Option<&Route> {
+    let target = u32::from(target);
+    routes
+        .iter()
+        .filter(|route| (route.network..=route.last).contains(&target))
+        .min_by_key(|route| (std::cmp::Reverse(route.prefix), route.metric))
 }
 
 #[cfg(any(windows, test))]
@@ -270,7 +351,7 @@ fn parse_routes(output: &str) -> Result<Vec<Route>, Error> {
             return Err(ERROR);
         }
         let source = source.parse().map_err(|_| ERROR)?;
-        metric.parse::<u32>().map_err(|_| ERROR)?;
+        let metric = metric.parse::<u32>().map_err(|_| ERROR)?;
         let on_link = match gateway {
             ["On-link"] | ["Auf", "Verbindung"] => true,
             [ip] if ip.parse::<Ipv4Addr>().is_ok() => false,
@@ -282,12 +363,13 @@ fn parse_routes(output: &str) -> Result<Vec<Route>, Error> {
             prefix,
             source,
             on_link,
+            metric,
         });
     }
     Err(ERROR)
 }
 
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 fn prefix_mask(prefix: u8) -> u32 {
     u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0)
 }
@@ -347,6 +429,45 @@ fn sorted(mut interfaces: Vec<Interface>) -> Vec<Interface> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selects_the_most_specific_windows_route_for_arp() {
+        let routes = parse_routes(
+            "Active Routes:\nNetwork Destination Netmask Gateway Interface Metric\n\
+            192.0.2.0 255.255.255.0 On-link 192.0.2.1 10\n\
+            192.0.2.42 255.255.255.255 192.0.2.254 192.0.2.1 20\n\
+            192.0.2.42 255.255.255.255 On-link 192.0.2.1 30\n\
+            ====================\n",
+        )
+        .unwrap();
+        assert!(
+            best_route(&routes, Ipv4Addr::new(192, 0, 2, 41))
+                .unwrap()
+                .on_link
+        );
+        assert!(
+            !best_route(&routes, Ipv4Addr::new(192, 0, 2, 42))
+                .unwrap()
+                .on_link
+        );
+    }
+
+    #[test]
+    fn linux_arp_route_must_be_direct_and_remote_to_the_interface() {
+        let address = Ipv4Addr::new(192, 0, 2, 1);
+        assert_eq!(
+            linux_on_link_route("192.0.2.2 dev eth0 src 192.0.2.1 uid 1000").unwrap(),
+            Some(("eth0", address))
+        );
+        assert_eq!(
+            linux_on_link_route("198.51.100.2 via 192.0.2.254 dev eth0 src 192.0.2.1").unwrap(),
+            None
+        );
+        assert_eq!(
+            linux_on_link_route("local 192.0.2.1 dev lo src 192.0.2.1").unwrap(),
+            None
+        );
+    }
 
     fn route_check(rows: &str) -> Result<(), Error> {
         let interface = Interface {

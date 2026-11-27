@@ -417,8 +417,8 @@ async fn ping_device(interface: &interfaces::Interface, ip: Ipv4Addr) -> String 
         .acquire()
         .await
         .expect("the probe semaphore stays open");
-    match runner.echo(&interface.name, ip).await {
-        ping::Outcome::Reply => "Yes".into(),
+    match runner.echo(Some(&interface.name), ip.into()).await {
+        ping::Outcome::Reply(_) => "Yes".into(),
         ping::Outcome::NoReply => "No".into(),
         ping::Outcome::TimedOut => "Timed out".into(),
         ping::Outcome::Failed(error) => error,

@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::IpAddr;
 
 #[cfg(any(windows, target_os = "linux"))]
 use std::{path::PathBuf, time::Duration};
@@ -6,20 +6,20 @@ use std::{path::PathBuf, time::Duration};
 use tokio::process::Command;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Outcome {
-    Reply,
+pub(crate) enum Outcome {
+    Reply(Option<String>),
     NoReply,
     TimedOut,
     Failed(String),
 }
 
-pub(super) struct Runner {
+pub(crate) struct Runner {
     #[cfg(any(windows, target_os = "linux"))]
     program: PathBuf,
 }
 
 #[cfg(windows)]
-pub(super) async fn prepare() -> Result<Runner, String> {
+pub(crate) async fn prepare() -> Result<Runner, String> {
     let program = crate::quick_tools::system::executable("ping.exe")?;
     tokio::fs::metadata(&program)
         .await
@@ -28,13 +28,13 @@ pub(super) async fn prepare() -> Result<Runner, String> {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) async fn prepare() -> Result<Runner, String> {
+pub(crate) async fn prepare() -> Result<Runner, String> {
     let program = find_program("ping").ok_or_else(|| "ping was not found on PATH.".to_owned())?;
     Ok(Runner { program })
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-pub(super) async fn prepare() -> Result<Runner, String> {
+pub(crate) async fn prepare() -> Result<Runner, String> {
     Err("Echo requests are supported on Windows and Linux.".into())
 }
 
@@ -55,15 +55,21 @@ pub(super) fn find_program(name: &str) -> Option<PathBuf> {
 
 impl Runner {
     #[cfg(any(windows, target_os = "linux"))]
-    pub(super) async fn echo(&self, device: &str, target: Ipv4Addr) -> Outcome {
+    pub(crate) async fn echo(&self, device: Option<&str>, target: IpAddr) -> Outcome {
         let mut command = Command::new(&self.program);
-        command.kill_on_drop(true);
+        let family = if target.is_ipv4() { "-4" } else { "-6" };
+        command.kill_on_drop(true).arg(family);
         #[cfg(windows)]
         command
-            .args(["-4", "-n", "1", "-w", "1000"])
+            .args(["-n", "1", "-w", "1000"])
             .creation_flags(0x0800_0000);
         #[cfg(target_os = "linux")]
-        command.args(["-4", "-n", "-c", "1", "-W", "1", "-I", device]);
+        {
+            command.args(["-n", "-c", "1", "-W", "1"]);
+            if let Some(device) = device {
+                command.args(["-I", device]);
+            }
+        }
         #[cfg(windows)]
         let _ = device;
         let result = tokio::time::timeout(
@@ -79,16 +85,16 @@ impl Runner {
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
-    pub(super) async fn echo(&self, _device: &str, _target: Ipv4Addr) -> Outcome {
+    pub(crate) async fn echo(&self, _device: Option<&str>, _target: IpAddr) -> Outcome {
         Outcome::Failed("Echo requests are supported on Windows and Linux.".into())
     }
 }
 
 #[cfg(windows)]
-fn classify(output: std::process::Output, target: Ipv4Addr) -> Outcome {
+fn classify(output: std::process::Output, target: IpAddr) -> Outcome {
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if confirms_echo(&stdout, target) {
-        Outcome::Reply
+    if let Some(reply) = windows_reply(&stdout, target) {
+        reply
     } else if output.status.success() || output.status.code() == Some(1) {
         Outcome::NoReply
     } else {
@@ -97,9 +103,13 @@ fn classify(output: std::process::Output, target: Ipv4Addr) -> Outcome {
 }
 
 #[cfg(target_os = "linux")]
-fn classify(output: std::process::Output, _target: Ipv4Addr) -> Outcome {
+fn classify(output: std::process::Output, _target: IpAddr) -> Outcome {
     match output.status.code() {
-        Some(0) => Outcome::Reply,
+        Some(0) => Outcome::Reply(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(round_trip),
+        ),
         Some(1) => Outcome::NoReply,
         _ => Outcome::Failed(command_error(&output)),
     }
@@ -116,17 +126,44 @@ pub(super) fn command_error(output: &std::process::Output) -> String {
 }
 
 #[cfg(any(windows, test))]
-fn confirms_echo(output: &str, target: Ipv4Addr) -> bool {
-    let address = format!("{target}:");
-    output.lines().any(|line| {
+fn windows_reply(output: &str, target: IpAddr) -> Option<Outcome> {
+    output.lines().find_map(|line| {
         let mut fields = line.split_ascii_whitespace();
-        fields.any(|field| field == address)
-            && fields.any(|field| {
+        if !fields.any(|field| {
+            field.strip_suffix(':').is_some_and(|address| {
+                let address = address
+                    .split_once('%')
+                    .map_or(address, |(address, _)| address);
+                address.parse::<IpAddr>().ok() == Some(target)
+            })
+        }) {
+            return None;
+        }
+        if target.is_ipv4() {
+            let confirmed = fields.any(|field| {
                 field
                     .strip_prefix("TTL=")
                     .is_some_and(|ttl| ttl.parse::<u8>().is_ok())
-            })
+            });
+            confirmed.then(|| Outcome::Reply(round_trip(line)))
+        } else {
+            // Windows omits TTL for IPv6 echoes, but includes the round-trip time.
+            round_trip(line).map(|time| Outcome::Reply(Some(time)))
+        }
     })
+}
+
+#[cfg(any(windows, target_os = "linux", test))]
+fn round_trip(line: &str) -> Option<String> {
+    line.match_indices(['=', '<'])
+        .find_map(|(offset, separator)| {
+            let (value, _) = line[offset + 1..].split_once("ms")?;
+            let value = value.trim();
+            let milliseconds: f64 = value.parse().ok()?;
+            let qualifier = if separator == "<" { "<" } else { "" };
+            (milliseconds.is_finite() && milliseconds >= 0.0)
+                .then(|| format!("{qualifier}{value} ms"))
+        })
 }
 
 #[cfg(test)]
@@ -135,18 +172,45 @@ mod tests {
 
     #[test]
     fn windows_echo_matches_a_numeric_reply_to_the_requested_address() {
-        let target = Ipv4Addr::new(192, 168, 1, 2);
-        assert!(confirms_echo(
-            "Antwort von 192.168.1.2: Bytes=32 Zeit<1ms TTL=64",
-            target,
-        ));
-        assert!(!confirms_echo(
-            "Reply from 192.168.1.2: Destination host unreachable.",
-            target,
-        ));
-        assert!(!confirms_echo(
-            "Reply from 192.168.1.3: bytes=32 time<1ms TTL=64",
-            target,
-        ));
+        let target = IpAddr::from([192, 168, 1, 2]);
+        assert_eq!(
+            windows_reply("Antwort von 192.168.1.2: Bytes=32 Zeit<1ms TTL=64", target),
+            Some(Outcome::Reply(Some("<1 ms".into()))),
+        );
+        assert!(
+            windows_reply(
+                "Reply from 192.168.1.2: Destination host unreachable.",
+                target,
+            )
+            .is_none()
+        );
+        assert!(
+            windows_reply("Reply from 192.168.1.3: bytes=32 time<1ms TTL=64", target,).is_none()
+        );
+    }
+
+    #[test]
+    fn windows_ipv6_echo_requires_a_reply_from_the_target_with_a_round_trip_time() {
+        let target = "fe80::12".parse().unwrap();
+        assert_eq!(
+            windows_reply("Antwort von fe80::12%5: Zeit=2ms", target),
+            Some(Outcome::Reply(Some("2 ms".into())))
+        );
+        assert!(
+            windows_reply(
+                "Reply from fe80::12%5: Destination host unreachable.",
+                target
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn linux_echo_preserves_fractional_round_trip_time() {
+        assert_eq!(
+            round_trip("64 bytes from ::1: icmp_seq=1 ttl=64 time=0.034 ms").as_deref(),
+            Some("0.034 ms")
+        );
+        assert!(round_trip("rtt min/avg/max/mdev = 0.034/0.034/0.034/0.000 ms").is_none());
     }
 }

@@ -57,7 +57,7 @@ pub enum Message {
     Start(String),
     ChecksStarted,
     CacheFinished(Result<Option<String>, String>),
-    SystemFinished(Result<BTreeSet<IpAddr>, String>),
+    SystemFinished(Result<Vec<IpAddr>, String>),
     NetBiosFinished(Result<Option<String>, String>),
     ConfiguredFinished(Option<SocketAddr>, Result<DnsReport, String>),
     DnsFinished(DnsCheck, Result<DnsReport, String>),
@@ -98,6 +98,17 @@ impl Resolver {
             Self::Empty => false,
             Self::Invalid | Self::Ip(_) => true,
             Self::Hostname(checks) => !checks.outstanding(),
+        }
+    }
+
+    pub fn target(&self) -> Option<IpAddr> {
+        match self {
+            Self::Ip(ip) => Some(*ip),
+            Self::Hostname(checks) => match &checks.system {
+                Check::Complete(addresses) => addresses.first().copied(),
+                _ => None,
+            },
+            _ => None,
         }
     }
 
@@ -167,10 +178,8 @@ impl Resolver {
 
     pub fn view(&self) -> Option<Element<'_, Message>> {
         let content: Element<'_, Message> = match self {
-            Self::Empty => return None,
-            Self::Invalid => text("Enter a valid hostname or IP address.").into(),
-            Self::Ip(ip) => text(format!("Skipped (IP address supplied: {ip})")).into(),
-            Self::Hostname(checks) => checks.view(),
+            Self::Hostname(checks) if !matches!(checks.cache, Check::Pending) => checks.view(),
+            _ => return None,
         };
         Some(
             column![text("Name Resolution").size(24), content]
@@ -194,7 +203,7 @@ pub struct HostnameChecks {
     host: String,
     name: Name,
     cache: Check<Option<String>>,
-    system: Check<BTreeSet<IpAddr>>,
+    system: Check<Vec<IpAddr>>,
     netbios: Check<Option<String>>,
     configured: Check<DnsReport>,
     configured_server: Option<SocketAddr>,
@@ -343,6 +352,7 @@ impl HostnameChecks {
 
     fn view(&self) -> Element<'_, Message> {
         const CHECK_WIDTH: f32 = 160.0;
+        let (local_override, system_override) = self.dns_overrides();
         let check = |label| column![text(label)].spacing(4).width(CHECK_WIDTH);
         let mut configured = check("Configured DNS");
         if let Some(server) = self.configured_server {
@@ -386,10 +396,25 @@ impl HostnameChecks {
                             .collect::<Vec<_>>()
                             .join(", ")
                     };
-                    text(summary).into()
+                    row![
+                        text(summary).width(Length::Fill),
+                        system_override.then(|| override_badge("System DNS Override")),
+                    ]
+                    .spacing(12)
+                    .into()
                 }),
             ),
-            (configured, self.configured.view(dns_result)),
+            (
+                configured,
+                self.configured.view(|report| {
+                    row![
+                        container(dns_result(report)).width(Length::Fill),
+                        local_override.then(|| override_badge("Local DNS Override")),
+                    ]
+                    .spacing(12)
+                    .into()
+                }),
+            ),
             (check("Google (DoH)"), self.google.view(dns_result)),
             (check("Cloudflare (DoH)"), self.cloudflare.view(dns_result)),
             (authority, self.authoritative.view(dns_result)),
@@ -414,6 +439,55 @@ impl HostnameChecks {
         .spacing(8)
         .into()
     }
+
+    fn dns_overrides(&self) -> (bool, bool) {
+        let Check::Complete(configured) = &self.configured else {
+            return (false, false);
+        };
+        let local_override = [&self.authoritative, &self.cloudflare, &self.google]
+            .into_iter()
+            .any(|reference| match reference {
+                Check::Complete(report) => {
+                    different_addresses(&configured.addresses, &report.addresses)
+                }
+                _ => false,
+            });
+        let system_override = match &self.system {
+            Check::Complete(addresses) => {
+                let system = [true, false].map(|ipv4| {
+                    Some(
+                        addresses
+                            .iter()
+                            .copied()
+                            .filter(|ip| ip.is_ipv4() == ipv4)
+                            .collect(),
+                    )
+                });
+                different_addresses(&configured.addresses, &system)
+            }
+            _ => false,
+        };
+        (local_override, system_override)
+    }
+}
+
+fn different_addresses(
+    left: &[Option<BTreeSet<IpAddr>>; 2],
+    right: &[Option<BTreeSet<IpAddr>>; 2],
+) -> bool {
+    left.iter()
+        .zip(right)
+        .any(|(left, right)| match (left, right) {
+            (Some(left), Some(right)) => left != right,
+            _ => false,
+        })
+}
+
+fn override_badge(label: &'static str) -> Element<'static, Message> {
+    container(text(label).size(14).color(color!(0x241A00)))
+        .padding([3, 8])
+        .style(|_| container::background(color!(0xF2C94C)).border(Border::default().rounded(5.0)))
+        .into()
 }
 
 impl From<String> for DnsReport {
@@ -422,6 +496,7 @@ impl From<String> for DnsReport {
             details,
             dnssec: None,
             nameservers: Vec::new(),
+            addresses: [None, None],
         }
     }
 }
@@ -482,6 +557,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn override_badges_compare_available_address_sets_independently() {
+        let mut resolver = Resolver::default();
+        resolver.update(Message::Start("example.com".into()));
+        let Resolver::Hostname(checks) = &mut resolver else {
+            panic!("expected hostname checks");
+        };
+        let first = IpAddr::from([192, 0, 2, 1]);
+        let second = IpAddr::from([192, 0, 2, 2]);
+        let unrelated_v6 = "2001:db8::1".parse().unwrap();
+        checks.configured = Check::Complete(DnsReport {
+            addresses: [Some(BTreeSet::from([first, second])), None],
+            ..String::new().into()
+        });
+        checks.system = Check::Complete(vec![second, first, unrelated_v6]);
+        checks.google = Check::Failed("Timed out".into());
+        assert_eq!(checks.dns_overrides(), (false, false));
+
+        checks.cloudflare = Check::Complete(DnsReport {
+            addresses: [Some(BTreeSet::from([first])), None],
+            ..String::new().into()
+        });
+        assert_eq!(checks.dns_overrides(), (true, false));
+
+        checks.system = Check::Complete(vec![second]);
+        assert_eq!(checks.dns_overrides(), (true, true));
+    }
+
+    #[test]
     fn cache_completion_starts_dns_checks_and_dotted_hosts_skip_netbios() {
         let mut resolver = Resolver::default();
         assert!(!resolver.done());
@@ -508,8 +611,12 @@ mod tests {
         assert!(!resolver.done());
         assert_eq!(resolver.next_checks().units(), 0);
 
-        let addresses = BTreeSet::from(["192.0.2.1".parse().unwrap()]);
-        resolver.update(Message::SystemFinished(Ok(addresses)));
+        let preferred = "2001:db8::1".parse().unwrap();
+        resolver.update(Message::SystemFinished(Ok(vec![
+            preferred,
+            "192.0.2.1".parse().unwrap(),
+        ])));
+        assert_eq!(resolver.target(), Some(preferred));
         assert_eq!(resolver.next_checks().units(), 0);
         resolver.update(Message::ConfiguredFinished(
             Some("192.0.2.53:53".parse().unwrap()),
@@ -542,7 +649,7 @@ mod tests {
         };
         assert!(matches!(checks.netbios, Check::Pending));
         assert!(matches!(checks.google, Check::Skipped));
-        let addresses = BTreeSet::from(["192.0.2.1".parse().unwrap()]);
+        let addresses = vec!["192.0.2.1".parse().unwrap()];
         resolver.update(Message::SystemFinished(Ok(addresses)));
         assert_eq!(resolver.next_checks().units(), 1);
         resolver.update(Message::ChecksStarted);
