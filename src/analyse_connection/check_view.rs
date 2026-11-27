@@ -12,7 +12,21 @@ pub(super) fn badge<'a, Message: 'a>(
     } else {
         color!(0xB32539)
     };
-    container(text(label).size(14).color(Color::WHITE))
+    colored_badge(label, background, Color::WHITE)
+}
+
+pub(super) fn warning_badge<'a, Message: 'a>(
+    label: impl text::IntoFragment<'a>,
+) -> Element<'a, Message> {
+    colored_badge(label, color!(0xF2C94C), color!(0x241A00))
+}
+
+fn colored_badge<'a, Message: 'a>(
+    label: impl text::IntoFragment<'a>,
+    background: Color,
+    foreground: Color,
+) -> Element<'a, Message> {
+    container(text(label).size(14).color(foreground))
         .padding([3, 8])
         .style(move |_| container::background(background).border(Border::default().rounded(5.0)))
         .into()
@@ -36,8 +50,9 @@ pub(super) fn checking<'a, Message: 'a>() -> Element<'a, Message> {
         .into()
 }
 
-pub(super) fn connectivity<'a, Message: 'a>(
-    target: String,
+pub(super) fn table<'a, Message: 'a>(
+    title: &'static str,
+    target: Option<String>,
     checks: impl IntoIterator<Item = (&'static str, Option<Element<'a, Message>>)>,
 ) -> Option<Element<'a, Message>> {
     const CHECK_WIDTH: f32 = 160.0;
@@ -62,8 +77,8 @@ pub(super) fn connectivity<'a, Message: 'a>(
     rows.peek()?;
     Some(
         column![
-            text("Connectivity").size(24),
-            text(target).size(14),
+            text(title).size(24),
+            target.map(|target| text(target).size(14)),
             container(row![text("Check").width(CHECK_WIDTH), text("Result")].spacing(12))
                 .padding([0, 12]),
             rule::horizontal(1),

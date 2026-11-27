@@ -1,5 +1,6 @@
 mod certificate_overlay;
 mod check_view;
+mod http;
 mod local_link;
 mod name_resolution;
 mod port_connectivity;
@@ -68,6 +69,7 @@ pub enum Message {
     Resolution(name_resolution::Message),
     LocalLink(local_link::Message),
     PortConnectivity(port_connectivity::Message),
+    HttpFinished(Result<http::Report, String>),
     ShowCertificates,
     CloseCertificates,
 }
@@ -84,6 +86,7 @@ pub struct State {
     local_link: local_link::State,
     port_connectivity: port_connectivity::State,
     tls: tls::State,
+    http: http::State,
     certificate_overlay: certificate_overlay::ViewState,
 }
 
@@ -161,6 +164,7 @@ impl State {
             }
             Message::Resolution(message) => self.resolver.update(message),
             Message::LocalLink(message) => self.local_link.update(message),
+            Message::HttpFinished(report) => self.http = http::State::Complete(report),
             Message::PortConnectivity(message) => {
                 use port_connectivity::Message as CheckMessage;
                 use protocol_detection::Check;
@@ -199,6 +203,7 @@ impl State {
         self.passive_result = protocol_detection::Check::Skipped;
         self.active_result = protocol_detection::Check::Skipped;
         self.tls = tls::State::default();
+        self.http = http::State::default();
     }
 
     fn next_checks(&mut self) -> Task<Message> {
@@ -215,6 +220,15 @@ impl State {
             .port_connectivity
             .next_checks(self.host.trim())
             .map(Message::PortConnectivity);
+        let http = match (
+            self.http_scheme(),
+            self.port_connectivity.visible_endpoint(),
+        ) {
+            (Some(https), Some(endpoint)) if self.port_connectivity.connected() => {
+                self.http.start(self.host.trim(), endpoint, https)
+            }
+            _ => Task::none(),
+        };
 
         // Claim ready checks before returning to iced, where other checks may finish.
         self.resolver
@@ -222,7 +236,7 @@ impl State {
         self.local_link.update(local_link::Message::ChecksStarted);
         self.port_connectivity
             .update(port_connectivity::Message::CheckStarted);
-        Task::batch([resolution, link, port])
+        Task::batch([resolution, link, port, http])
     }
 
     fn is_running(&self) -> bool {
@@ -230,6 +244,7 @@ impl State {
             || self.local_link.is_running()
             || self.port_connectivity.is_running()
             || self.protocol_check_running()
+            || self.http.is_running()
     }
 
     fn protocol_check_running(&self) -> bool {
@@ -323,6 +338,7 @@ impl State {
                 .view()
                 .map(|view| view.map(Message::Resolution)),
             self.connectivity_view(),
+            self.http.view(),
         ]
         .spacing(24);
         let screen =
@@ -358,6 +374,7 @@ impl State {
         Some(
             row![
                 protocol,
+                space::horizontal(),
                 self.protocol_for_follow_up()
                     .is_some_and(|expected| detected.conflicts_with(expected))
                     .then(|| { check_view::badge("Protocol mismatch", false) }),
@@ -380,14 +397,28 @@ impl State {
             .or_else(|| self.observed_protocol())
     }
 
+    fn http_scheme(&self) -> Option<bool> {
+        use protocol_detection::{Application, Detected};
+        match self.protocol {
+            Some(Protocol::Http) => Some(false),
+            Some(Protocol::Https) => Some(true),
+            _ => match self.observed_protocol() {
+                Some(Detected::Plain(Application::Http)) => Some(false),
+                Some(Detected::Tls(Some(Application::Http))) => Some(true),
+                _ => None,
+            },
+        }
+    }
+
     fn connectivity_view(&self) -> Option<Element<'_, Message>> {
         let target = self.target_ip?;
         let target = self
             .port_connectivity
             .visible_endpoint()
             .map_or_else(|| target.to_string(), |endpoint| endpoint.to_string());
-        check_view::connectivity(
-            target,
+        check_view::table(
+            "Connectivity",
+            Some(target),
             [
                 (
                     "ARP-Table",
