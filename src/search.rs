@@ -7,7 +7,7 @@ use iced::{
 use crate::{
     OpenedModule, device_scan,
     encoder::{Encoder, Encoding},
-    mailbox_scanner, network_scanner, nut, path_length_checker, wake_on_lan,
+    mailbox_scanner, network_scanner, nut, path_length_checker, spelling_alphabet, wake_on_lan,
 };
 #[cfg(windows)]
 use crate::{
@@ -60,6 +60,10 @@ const TOOLS: &[Tool] = &[
     Tool::new(Encoding::Unicode.title(), || {
         Encoder::new(Encoding::Unicode)
     }),
+    Tool::new(
+        spelling_alphabet::State::TITLE,
+        spelling_alphabet::State::new,
+    ),
     Tool::new(
         path_length_checker::PathLengthChecker::TITLE,
         path_length_checker::PathLengthChecker::new,

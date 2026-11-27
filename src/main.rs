@@ -31,6 +31,7 @@ pub mod encoder;
 mod loading;
 pub mod mailbox_scanner;
 pub mod network_scanner;
+pub mod spelling_alphabet;
 pub use network_scanner::device_scan;
 pub mod nut;
 pub mod path_length_checker;
@@ -52,6 +53,7 @@ pub enum Module {
     #[cfg(windows)]
     QuickTool(quick_tools::State),
     Encoder(encoder::Encoder),
+    SpellingAlphabet(spelling_alphabet::State),
     PathLengthChecker(path_length_checker::PathLengthChecker),
     Nut(nut::Nut),
     WakeOnLan(wake_on_lan::State),
