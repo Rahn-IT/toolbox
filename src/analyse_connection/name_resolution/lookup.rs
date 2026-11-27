@@ -92,7 +92,7 @@ pub(super) async fn configured(name: Name) -> (Option<SocketAddr>, Result<DnsRep
     match dns::configured_server().await {
         Ok(Some(address)) => (
             Some(address),
-            resolver_lookup(Server::Plain(address), &name, false).await,
+            resolver_lookup(Server::Plain(address), &name).await,
         ),
         Ok(None) => (None, Err("No DNS server configured".into())),
         Err(error) => (None, Err(error)),
@@ -100,7 +100,7 @@ pub(super) async fn configured(name: Name) -> (Option<SocketAddr>, Result<DnsRep
 }
 
 pub(super) async fn public(server: Server, name: Name) -> Result<DnsReport, String> {
-    resolver_lookup(server, &name, true).await
+    resolver_lookup(server, &name).await
 }
 
 pub(super) async fn authoritative(name: Name) -> Result<DnsReport, String> {
@@ -114,16 +114,8 @@ type AddressResponses = [Result<DnsResponse, String>; 2];
 #[derive(Clone)]
 pub struct DnsReport {
     pub(super) details: String,
-    pub(super) dnssec: Option<DnssecWarning>,
     pub(super) nameservers: Vec<Name>,
     pub(super) addresses: [Option<BTreeSet<IpAddr>>; 2],
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum DnssecWarning {
-    Unverified,
-    Unsupported,
-    ValidationFailed,
 }
 
 struct Authority {
@@ -142,7 +134,6 @@ struct AddressChain {
     nameservers: Vec<Name>,
     answered: bool,
     complete: bool,
-    dnssec: Option<DnssecWarning>,
 }
 
 async fn address_queries(server: Server, name: &Name, recursive: bool) -> AddressResponses {
@@ -153,10 +144,10 @@ async fn address_queries(server: Server, name: &Name, recursive: bool) -> Addres
     [ipv4, ipv6]
 }
 
-async fn resolver_lookup(server: Server, name: &Name, dnssec: bool) -> Result<DnsReport, String> {
+async fn resolver_lookup(server: Server, name: &Name) -> Result<DnsReport, String> {
     tokio::time::timeout(Duration::from_secs(12), async {
         let replies = address_queries(server, name, true).await;
-        follow_addresses(name, replies, dnssec, |name, kind| async move {
+        follow_addresses(name, replies, |name, kind| async move {
             server
                 .query(name, kind, true)
                 .await
@@ -171,7 +162,6 @@ async fn resolver_lookup(server: Server, name: &Name, dnssec: bool) -> Result<Dn
 async fn follow_addresses<F, Fut>(
     name: &Name,
     [ipv4, ipv6]: AddressResponses,
-    dnssec: bool,
     query: F,
 ) -> Result<DnsReport, String>
 where
@@ -179,11 +169,10 @@ where
     Fut: Future<Output = DnsReply> + Send,
 {
     let (ipv4, ipv6) = tokio::join!(
-        follow_family(name.clone(), RecordType::A, ipv4, dnssec, &query),
-        follow_family(name.clone(), RecordType::AAAA, ipv6, dnssec, &query),
+        follow_family(name.clone(), RecordType::A, ipv4, &query),
+        follow_family(name.clone(), RecordType::AAAA, ipv6, &query),
     );
     let answered = ipv4.answered || ipv6.answered;
-    let dnssec = ipv4.dnssec.max(ipv6.dnssec);
     let no_addresses = ipv4.addresses.is_empty() && ipv6.addresses.is_empty();
     let no_notes = ipv4.notes.is_empty() && ipv6.notes.is_empty();
     let addresses = [&ipv4, &ipv6].map(|chain| {
@@ -225,10 +214,9 @@ where
             nameservers.push(server);
         }
     }
-    if answered || dnssec.is_some() {
+    if answered {
         Ok(DnsReport {
             details,
-            dnssec,
             nameservers,
             addresses,
         })
@@ -241,7 +229,6 @@ async fn follow_family<F, Fut>(
     mut name: Name,
     kind: RecordType,
     first_reply: Result<DnsResponse, String>,
-    dnssec: bool,
     query: &F,
 ) -> AddressChain
 where
@@ -274,9 +261,6 @@ where
         let answered = matches!(status, ResponseCode::NoError | ResponseCode::NXDomain);
         chain.answered |= answered;
         chain.notes.extend(extended_errors(&response));
-        if dnssec {
-            chain.dnssec = chain.dnssec.max(dnssec_warning(&response));
-        }
         if !answered {
             chain.notes.push(status.to_string());
             return chain;
@@ -329,24 +313,6 @@ where
     }
 }
 
-fn dnssec_warning(response: &DnsResponse) -> Option<DnssecWarning> {
-    let extended = extended_error_data(response)
-        .filter_map(|(code, _)| match code {
-            1 | 2 => Some(DnssecWarning::Unsupported),
-            6..=12 => Some(DnssecWarning::ValidationFailed),
-            _ => None,
-        })
-        .max();
-    extended.or_else(|| {
-        (!response.authentic_data()
-            && matches!(
-                response.response_code(),
-                ResponseCode::NoError | ResponseCode::NXDomain
-            ))
-        .then_some(DnssecWarning::Unverified)
-    })
-}
-
 fn extended_error_data(response: &DnsResponse) -> impl Iterator<Item = (u16, &[u8])> + '_ {
     const EXTENDED_DNS_ERROR: u16 = 15;
     response
@@ -369,11 +335,10 @@ fn extended_errors(response: &DnsResponse) -> impl Iterator<Item = String> + '_ 
     extended_error_data(response).map(|(code, detail)| {
         let detail = String::from_utf8_lossy(detail);
         let detail = detail.trim();
-        let label = if code == 6 { " (DNSSEC bogus)" } else { "" };
         if detail.is_empty() {
-            format!("Extended DNS error {code}{label}")
+            format!("Extended DNS error {code}")
         } else {
-            format!("Extended DNS error {code}{label} · {detail}")
+            format!("Extended DNS error {code} · {detail}")
         }
     })
 }
@@ -426,7 +391,7 @@ fn check_discovery_status(response: &DnsResponse) -> Result<(), String> {
 async fn authoritative_lookup(name: &Name) -> Result<DnsReport, String> {
     let (authority, responses) =
         authoritative_answers(name, [RecordType::A, RecordType::AAAA]).await?;
-    let mut result = follow_addresses(name, responses, false, |target, kind| async move {
+    let mut result = follow_addresses(name, responses, |target, kind| async move {
         let (authority, [answer]) = authoritative_answers(&target, [kind]).await?;
         answer.map(|response| (response, Some(authority)))
     })
@@ -543,7 +508,6 @@ mod tests {
                 DnsResponse::from_message(alias).map_err(|error| error.to_string()),
                 DnsResponse::from_message(Message::new()).map_err(|error| error.to_string()),
             ],
-            false,
             |name, kind| {
                 assert_eq!(name, target);
                 assert_eq!(kind, RecordType::A);
@@ -560,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn reports_explicit_dnssec_errors_from_the_resolver() {
+    fn reports_extended_errors_from_the_resolver() {
         let mut message = Message::new();
         let mut edns = Edns::new();
         edns.options_mut()
@@ -569,21 +533,20 @@ mod tests {
         let response = DnsResponse::from_message(message).unwrap();
         assert_eq!(
             extended_errors(&response).collect::<Vec<_>>(),
-            ["Extended DNS error 6 (DNSSEC bogus)"]
+            ["Extended DNS error 6"]
         );
-        assert!(dnssec_warning(&response) == Some(DnssecWarning::ValidationFailed));
     }
 
     #[tokio::test]
     #[ignore = "requires network access to Cloudflare and Google on TCP port 443"]
-    async fn public_resolvers_authenticate_a_signed_domain_over_https() {
+    async fn public_resolvers_return_addresses_over_https() {
         let name = Name::from_ascii("cloudflare.com.").unwrap();
         let (cloudflare, google) = tokio::join!(
             CLOUDFLARE.query(name.clone(), RecordType::A, true),
             GOOGLE.query(name, RecordType::A, true),
         );
-        assert!(cloudflare.expect("Cloudflare DoH").authentic_data());
-        assert!(google.expect("Google DoH").authentic_data());
+        assert!(!cloudflare.expect("Cloudflare DoH").answers().is_empty());
+        assert!(!google.expect("Google DoH").answers().is_empty());
     }
 
     #[tokio::test]

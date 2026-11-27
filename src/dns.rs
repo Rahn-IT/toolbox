@@ -5,7 +5,7 @@ use hickory_client::{
     client::Client,
     proto::{
         h2::HttpsClientStreamBuilder,
-        op::{Edns, Message, Query},
+        op::{Message, Query},
         rr::{Name, RecordType},
         runtime::TokioRuntimeProvider,
         tcp::TcpClientStream,
@@ -64,12 +64,6 @@ impl Server {
         request
             .add_query(Query::query(name, record_type))
             .set_recursion_desired(recursive);
-
-        if matches!(self, Self::Https(..)) {
-            let mut edns = Edns::new();
-            edns.set_dnssec_ok(true);
-            request.set_edns(edns);
-        }
 
         tokio::time::timeout(TIMEOUT, self.exchange(request))
             .await

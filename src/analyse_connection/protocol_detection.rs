@@ -1,9 +1,14 @@
 use std::{fmt, io, time::Duration};
 
+use hickory_client::proto::{
+    op::{Message, MessageType, Query},
+    rr::{Name, RecordType},
+};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     time::{Instant, timeout_at},
 };
+use tokio_rustls::rustls;
 
 use super::Protocol;
 
@@ -15,6 +20,8 @@ pub enum Application {
     Ftp,
     Imap,
     Pop3,
+    Smb,
+    Dns,
 }
 
 impl fmt::Display for Application {
@@ -26,6 +33,8 @@ impl fmt::Display for Application {
             Self::Ftp => "FTP",
             Self::Imap => "IMAP",
             Self::Pop3 => "POP3",
+            Self::Smb => "SMB",
+            Self::Dns => "DNS over TCP",
         })
     }
 }
@@ -254,6 +263,86 @@ fn http_status(line: &[u8]) -> bool {
 
 fn decimal(bytes: &[u8]) -> bool {
     !bytes.is_empty() && bytes.iter().all(u8::is_ascii_digit)
+}
+
+pub(super) async fn dns_tcp(stream: &mut (impl AsyncRead + AsyncWrite + Unpin)) -> Option<()> {
+    let mut request = Message::new();
+    request.add_query(Query::query(Name::root(), RecordType::SOA));
+    let request_bytes = request.to_vec().ok()?;
+    stream
+        .write_u16(u16::try_from(request_bytes.len()).ok()?)
+        .await
+        .ok()?;
+    stream.write_all(&request_bytes).await.ok()?;
+    let length = usize::from(stream.read_u16().await.ok()?);
+    let mut response = vec![0; length];
+    stream.read_exact(&mut response).await.ok()?;
+    let response = Message::from_vec(&response).ok()?;
+    (response.message_type() == MessageType::Response
+        && response.id() == request.id()
+        && response.op_code() == request.op_code()
+        && response.queries() == request.queries())
+    .then_some(())
+}
+
+const SMB_DIALECTS: [u16; 4] = [0x0202, 0x0210, 0x0300, 0x0302];
+const SMB2_HEADER_SIZE: usize = 64;
+
+pub(super) async fn smb_tcp(stream: &mut (impl AsyncRead + AsyncWrite + Unpin)) -> Option<()> {
+    let mut client_guid = [0; 16];
+    rustls::crypto::ring::default_provider()
+        .secure_random
+        .fill(&mut client_guid)
+        .ok()?;
+
+    let mut header = [0; SMB2_HEADER_SIZE];
+    header[..4].copy_from_slice(b"\xfeSMB");
+    header[4..6].copy_from_slice(&(SMB2_HEADER_SIZE as u16).to_le_bytes());
+    header[14..16].copy_from_slice(&1u16.to_le_bytes()); // Credits requested.
+
+    let mut negotiate = [0; 36];
+    negotiate[..2].copy_from_slice(&36u16.to_le_bytes());
+    negotiate[2..4].copy_from_slice(&(SMB_DIALECTS.len() as u16).to_le_bytes());
+    negotiate[4..6].copy_from_slice(&1u16.to_le_bytes()); // Signing enabled.
+    negotiate[12..28].copy_from_slice(&client_guid);
+
+    let length = (header.len() + negotiate.len() + SMB_DIALECTS.len() * 2) as u32;
+    let mut request = Vec::with_capacity(length as usize + 4);
+    request.extend_from_slice(&length.to_be_bytes());
+    request.extend_from_slice(&header);
+    request.extend_from_slice(&negotiate);
+    for dialect in SMB_DIALECTS {
+        request.extend_from_slice(&dialect.to_le_bytes());
+    }
+    stream.write_all(&request).await.ok()?;
+
+    // A negotiation reply fits within this bound, including its security buffer.
+    let length = stream.read_u32().await.ok()? as usize;
+    if !(SMB2_HEADER_SIZE + 8..=128 * 1024 - 1).contains(&length) {
+        return None;
+    }
+    let mut response = vec![0; length];
+    stream.read_exact(&mut response).await.ok()?;
+    smb_negotiate_reply(&response).then_some(())
+}
+
+fn smb_negotiate_reply(response: &[u8]) -> bool {
+    if response.len() < SMB2_HEADER_SIZE + 8
+        || !response.starts_with(b"\xfeSMB\x40\x00")
+        || response[12..14] != [0, 0] // NEGOTIATE
+        || response[16] & 1 == 0 // Server-to-client flag.
+        || response[20..32] != [0; 12]
+    // NextCommand and request MessageId.
+    {
+        return false;
+    }
+    if response[8..12] != [0; 4] {
+        // A matching SMB2 error also identifies the protocol.
+        return response[64..66] == [9, 0];
+    }
+    response.len() >= 128
+        && response[64..66] == [65, 0]
+        && SMB_DIALECTS.contains(&u16::from_le_bytes([response[68], response[69]]))
 }
 
 #[cfg(test)]

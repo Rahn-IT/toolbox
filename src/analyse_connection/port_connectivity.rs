@@ -106,7 +106,7 @@ enum Probe {
     StartActive(Option<TcpStream>, Target),
     Tls(TcpStream, Target),
     TlsApplication(Box<TlsStream<TcpStream>>, Target),
-    Http(Target),
+    Plaintext(Target),
     Finish(Option<Detected>),
     Done,
 }
@@ -194,7 +194,7 @@ impl Probe {
                     None if report.peer_alert || !report.presented.certificates.is_empty() => {
                         Self::Finish(Some(Detected::Tls(None)))
                     }
-                    None => Self::Http(target),
+                    None => Self::Plaintext(target),
                 };
                 Some((Message::TlsFinished(report), next))
             }
@@ -212,24 +212,46 @@ impl Probe {
                     Self::Done,
                 ))
             }
-            Self::Http(target) => {
-                let detected = async {
-                    let mut stream =
-                        tokio::time::timeout_at(target.deadline(), connect(target.endpoint))
-                            .await
-                            .ok()?
-                            .ok()?;
-                    protocol_detection::http(&mut stream, &target.authority(), target.deadline())
-                        .await
-                        .then_some(Detected::Plain(Application::Http))
-                }
-                .await;
+            Self::Plaintext(target) => {
+                let detected = plaintext(&target).await.map(Detected::Plain);
                 Some((Message::ActiveFinished(detected), Self::Done))
             }
             Self::Finish(detected) => Some((Message::ActiveFinished(detected), Self::Done)),
             Self::Done => None,
         }
     }
+}
+
+async fn plaintext(target: &Target) -> Option<Application> {
+    const BINARY_WINDOW: Duration = Duration::from_millis(750);
+    let deadline = target.deadline();
+    let http_deadline = deadline - BINARY_WINDOW * 2;
+    let http = async {
+        let mut stream = connect(target.endpoint).await.ok()?;
+        protocol_detection::http(&mut stream, &target.authority(), http_deadline)
+            .await
+            .then_some(Application::Http)
+    };
+    if let Ok(Some(application)) = tokio::time::timeout_at(http_deadline, http).await {
+        return Some(application);
+    }
+    let smb = async {
+        let mut stream = connect(target.endpoint).await.ok()?;
+        protocol_detection::smb_tcp(&mut stream).await
+    };
+    let smb_deadline = (Instant::now() + BINARY_WINDOW).min(deadline - BINARY_WINDOW);
+    if let Ok(Some(())) = tokio::time::timeout_at(smb_deadline, smb).await {
+        return Some(Application::Smb);
+    }
+    let dns = async {
+        let mut stream = connect(target.endpoint).await.ok()?;
+        protocol_detection::dns_tcp(&mut stream).await
+    };
+    tokio::time::timeout_at((Instant::now() + BINARY_WINDOW).min(deadline), dns)
+        .await
+        .ok()
+        .flatten()
+        .map(|()| Application::Dns)
 }
 
 async fn connect(endpoint: SocketAddr) -> Result<TcpStream, Outcome> {
@@ -251,6 +273,71 @@ mod tests {
         net::TcpListener,
         time::timeout,
     };
+
+    #[tokio::test]
+    async fn discovers_smb_and_dns_on_ephemeral_tcp_ports() {
+        use hickory_client::proto::op::{Message as DnsMessage, MessageType, ResponseCode};
+
+        for application in [Application::Smb, Application::Dns] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                for first_byte in [22, b'H'] {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    assert_eq!(stream.read_u8().await.unwrap(), first_byte);
+                    stream.shutdown().await.unwrap();
+                }
+                let (mut smb, _) = listener.accept().await.unwrap();
+                let length = smb.read_u32().await.unwrap() as usize;
+                assert!((100..=1024).contains(&length));
+                let mut request = vec![0; length];
+                smb.read_exact(&mut request).await.unwrap();
+                assert!(request.starts_with(b"\xfeSMB"));
+                assert_eq!(request[12..14], [0, 0]);
+                if application == Application::Smb {
+                    let mut response = [0; 128];
+                    response[..6].copy_from_slice(b"\xfeSMB\x40\x00");
+                    response[16] = 1;
+                    response[64] = 65;
+                    response[68..70].copy_from_slice(&0x0302u16.to_le_bytes());
+                    smb.write_u32(response.len() as u32).await.unwrap();
+                    smb.write_all(&response).await.unwrap();
+                } else {
+                    smb.shutdown().await.unwrap();
+                    let (mut dns, _) = listener.accept().await.unwrap();
+                    let length = dns.read_u16().await.unwrap() as usize;
+                    let mut buffer = vec![0; length];
+                    dns.read_exact(&mut buffer).await.unwrap();
+                    let mut response = DnsMessage::from_vec(&buffer).unwrap();
+                    assert!(!response.recursion_desired());
+                    response
+                        .set_message_type(MessageType::Response)
+                        .set_response_code(ResponseCode::Refused);
+                    let response = response.to_vec().unwrap();
+                    dns.write_u16(response.len() as u16).await.unwrap();
+                    dns.write_all(&response).await.unwrap();
+                }
+                assert!(
+                    timeout(Duration::from_millis(50), listener.accept())
+                        .await
+                        .is_err()
+                );
+            });
+            let mut probe = Probe::Tcp(endpoint, "localhost".into());
+            let mut result = None;
+            while let Some((message, next)) = probe.next().await {
+                if let Message::ActiveFinished(detected) = message {
+                    result = detected;
+                }
+                probe = next;
+            }
+            assert_eq!(result, Some(Detected::Plain(application)));
+            timeout(Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn a_fragmented_ssh_greeting_finishes_without_active_probes() {

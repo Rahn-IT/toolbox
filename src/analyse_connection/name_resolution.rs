@@ -7,10 +7,10 @@ use std::{
 
 use hickory_client::proto::rr::Name;
 use iced::{
-    Alignment, Border, Color, Element, Length, Task, color,
+    Alignment, Border, Element, Length, Task, color,
     widget::{column, container, row, rule, text},
 };
-use lookup::{DnsReport, DnssecWarning};
+use lookup::DnsReport;
 
 #[derive(Default)]
 enum Check<T> {
@@ -415,8 +415,11 @@ impl HostnameChecks {
                     .into()
                 }),
             ),
-            (check("Google (DoH)"), self.google.view(dns_result)),
-            (check("Cloudflare (DoH)"), self.cloudflare.view(dns_result)),
+            (check("Google"), self.google.view(encrypted_dns_result)),
+            (
+                check("Cloudflare"),
+                self.cloudflare.view(encrypted_dns_result),
+            ),
             (authority, self.authoritative.view(dns_result)),
         ];
         let rows = column(entries.into_iter().filter_map(|(check, value)| {
@@ -523,27 +526,23 @@ impl From<String> for DnsReport {
     fn from(details: String) -> Self {
         Self {
             details,
-            dnssec: None,
             nameservers: Vec::new(),
             addresses: [None, None],
         }
     }
 }
 
+fn encrypted_dns_result(report: &DnsReport) -> Element<'_, Message> {
+    row![
+        dns_result(report),
+        super::check_view::badge("Encrypted", true)
+    ]
+    .spacing(12)
+    .into()
+}
+
 fn dns_result(report: &DnsReport) -> Element<'_, Message> {
-    let badge = report.dnssec.map(|warning| {
-        let label = match warning {
-            DnssecWarning::Unverified => "DNSSEC unverified",
-            DnssecWarning::Unsupported => "DNSSEC not supported",
-            DnssecWarning::ValidationFailed => "DNSSEC validation failed",
-        };
-        container(text(label).size(14).color(Color::WHITE))
-            .padding([3, 8])
-            .style(|_| {
-                container::background(color!(0xB32539)).border(Border::default().rounded(5.0))
-            })
-    });
-    let details = column(report.details.lines().map(|line| {
+    column(report.details.lines().map(|line| {
         if let Some(alias) = line.strip_prefix("CNAME ") {
             let tag =
                 container(text("CNAME").size(14))
@@ -563,8 +562,8 @@ fn dns_result(report: &DnsReport) -> Element<'_, Message> {
         }
     }))
     .width(Length::Fill)
-    .spacing(4);
-    row![details, badge].spacing(12).into()
+    .spacing(4)
+    .into()
 }
 
 fn cache_addresses(records: &str) -> String {

@@ -424,11 +424,13 @@ impl State {
             .port_connectivity
             .visible_endpoint()
             .map_or_else(|| target.to_string(), |endpoint| endpoint.to_string());
+        let (interface, first_hop) = self.route_views();
         check_view::table(
             "Connectivity",
             Some(target),
             [
-                ("Route", Some(self.route_view())),
+                ("Used Interface", Some(interface)),
+                ("First Hop", first_hop),
                 (
                     "ARP-Table",
                     self.local_link
@@ -470,26 +472,29 @@ impl State {
         )
     }
 
-    fn route_view(&self) -> Element<'_, Message> {
-        let Some(result) = &self.route else {
-            return check_view::checking();
-        };
-        match result {
-            Ok(route) => column![
-                route
-                    .interface
-                    .as_deref()
-                    .map(|interface| text(format!("Interface {interface}"))),
-                text(format!("Source {}", route.source)),
-                text(
-                    route
-                        .gateway
-                        .map_or_else(|| "On-link".into(), |gateway| format!("Via {gateway}"))
+    fn route_views(&self) -> (Element<'_, Message>, Option<Element<'_, Message>>) {
+        match &self.route {
+            None => (check_view::checking(), None),
+            Some(Ok(route)) => (
+                column![
+                    route.interface.as_deref().map(text),
+                    text(format!("Source {}", route.source)),
+                ]
+                .spacing(4)
+                .into(),
+                Some(
+                    text(
+                        route
+                            .gateway
+                            .map_or_else(|| "On-link".into(), |gateway| gateway.to_string()),
+                    )
+                    .into(),
                 ),
-            ]
-            .spacing(4)
-            .into(),
-            Err(error) => check_view::error_badge("Route unavailable", error.to_string()),
+            ),
+            Some(Err(error)) => (
+                check_view::error_badge("Route unavailable", error.to_string()),
+                None,
+            ),
         }
     }
 }
