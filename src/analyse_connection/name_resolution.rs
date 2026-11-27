@@ -354,6 +354,14 @@ impl HostnameChecks {
         const CHECK_WIDTH: f32 = 160.0;
         let (local_override, system_override) = self.dns_overrides();
         let check = |label| column![text(label)].spacing(4).width(CHECK_WIDTH);
+        let encrypted_check = |label, result: &Check<DnsReport>| {
+            let name = check(label);
+            if matches!(result, Check::Complete(_)) {
+                name.push(super::check_view::badge("Encrypted", true))
+            } else {
+                name
+            }
+        };
         let mut configured = check("Configured DNS");
         if let Some(server) = self.configured_server {
             configured = configured.push(
@@ -415,10 +423,13 @@ impl HostnameChecks {
                     .into()
                 }),
             ),
-            (check("Google"), self.google.view(encrypted_dns_result)),
             (
-                check("Cloudflare"),
-                self.cloudflare.view(encrypted_dns_result),
+                encrypted_check("Google", &self.google),
+                self.google.view(dns_result),
+            ),
+            (
+                encrypted_check("Cloudflare", &self.cloudflare),
+                self.cloudflare.view(dns_result),
             ),
             (authority, self.authoritative.view(dns_result)),
         ];
@@ -530,15 +541,6 @@ impl From<String> for DnsReport {
             addresses: [None, None],
         }
     }
-}
-
-fn encrypted_dns_result(report: &DnsReport) -> Element<'_, Message> {
-    row![
-        dns_result(report),
-        super::check_view::badge("Encrypted", true)
-    ]
-    .spacing(12)
-    .into()
 }
 
 fn dns_result(report: &DnsReport) -> Element<'_, Message> {

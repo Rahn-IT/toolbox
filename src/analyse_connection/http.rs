@@ -2,7 +2,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use iced::{
     Element, Task,
-    widget::{column, text},
+    widget::{button, column, row, space, text},
 };
 use reqwest::{Client, StatusCode, Url, Version, redirect};
 use tokio::time::Instant;
@@ -11,6 +11,7 @@ use super::{check_view, tls};
 
 const BODY_LIMIT: usize = 128 * 1024;
 const MAX_REDIRECTS: usize = 5;
+const CROSS_HOST_REDIRECT: &str = "Redirect leaves the analysed hostname";
 const HEADERS: &[(&str, &str)] = &[
     ("Server", "server"),
     ("Content-Type", "content-type"),
@@ -62,7 +63,7 @@ impl State {
         matches!(self, Self::Checking)
     }
 
-    pub fn view(&self) -> Option<Element<'_, super::Message>> {
+    pub fn view(&self, can_edit: bool) -> Option<Element<'_, super::Message>> {
         let status = match self {
             Self::Skipped => return None,
             Self::Checking => check_view::checking(),
@@ -97,11 +98,28 @@ impl State {
                 });
                 rows.push(("Redirect chain", Some(column(hops).spacing(6).into())));
             }
-            rows.extend(
-                report
-                    .redirect_stop
-                    .map(|reason| ("Redirect stopped", Some(check_view::badge(reason, false)))),
-            );
+            if let Some(reason) = report.redirect_stop {
+                let redirect_host = (reason == CROSS_HOST_REDIRECT)
+                    .then(|| report.redirects.last()?.to.host_str())
+                    .flatten();
+                rows.push((
+                    "Redirect stopped",
+                    Some(
+                        row![
+                            check_view::badge(reason, false),
+                            space::horizontal(),
+                            redirect_host.map(|host| {
+                                button("Check new Hostname").on_press_maybe(
+                                    can_edit.then(|| super::Message::HostEdited(host.to_owned())),
+                                )
+                            }),
+                        ]
+                        .align_y(iced::Alignment::Center)
+                        .spacing(8)
+                        .into(),
+                    ),
+                ));
+            }
         }
         check_view::table("HTTP", None, rows)
     }
@@ -247,7 +265,7 @@ fn redirect_stop_reason(from: &Url, to: &Url, visited: &[Url]) -> Option<&'stati
     } else if !to.username().is_empty() || to.password().is_some() {
         Some("Redirect contains credentials")
     } else if from.host() != to.host() {
-        Some("Redirect leaves the analysed hostname")
+        Some(CROSS_HOST_REDIRECT)
     } else if from.scheme() == "https" && to.scheme() == "http" {
         Some("HTTPS to HTTP downgrade")
     } else if visited.contains(to) {
@@ -348,6 +366,7 @@ mod tests {
 
     #[tokio::test]
     async fn follows_a_relative_redirect_and_keeps_the_host_header_and_chain() {
+        crate::install_tls_provider();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {

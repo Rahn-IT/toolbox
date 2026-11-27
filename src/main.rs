@@ -12,6 +12,8 @@ fn main() -> Result<(), iced::Error> {
         Err(error) => eprintln!("Could not restart as administrator: {error}"),
     }
 
+    install_tls_provider();
+
     iced::application(TabManager::default, TabManager::update, TabManager::view)
         .title("Rahn-IT Toolbox")
         .window(iced::window::Settings {
@@ -22,6 +24,11 @@ fn main() -> Result<(), iced::Error> {
         })
         .subscription(TabManager::subscription)
         .run()
+}
+
+fn install_tls_provider() {
+    // Reqwest uses the same ring provider as our other rustls clients.
+    let _ = tokio_rustls::rustls::crypto::ring::default_provider().install_default();
 }
 
 pub mod action;

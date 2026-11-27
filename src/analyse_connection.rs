@@ -339,7 +339,7 @@ impl State {
                 .view()
                 .map(|view| view.map(Message::Resolution)),
             self.connectivity_view(),
-            self.http.view(),
+            self.http.view(self.can_edit()),
         ]
         .spacing(24);
         let screen =

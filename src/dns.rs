@@ -21,10 +21,12 @@ const TIMEOUT: Duration = Duration::from_secs(3);
 pub(crate) async fn configured_server() -> Result<Option<SocketAddr>, String> {
     let (config, _) =
         hickory_resolver::system_conf::read_system_conf().map_err(|error| error.to_string())?;
-    Ok(config
-        .name_servers()
-        .first()
-        .map(|server| server.socket_addr))
+    Ok(config.name_servers().first().and_then(|server| {
+        server
+            .connections
+            .first()
+            .map(|connection| SocketAddr::new(server.ip, connection.port))
+    }))
 }
 
 #[cfg(windows)]
