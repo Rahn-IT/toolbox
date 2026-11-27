@@ -6,10 +6,10 @@ use crate::{Module, OpenedModule, action::Action, tab_manager::TabMessage};
 
 pub mod device_scan;
 pub mod interfaces;
-mod netbios;
+pub(crate) mod name_lookup;
+pub(crate) mod netbios;
 mod ping;
 mod ports;
-mod reverse_dns;
 mod scan;
 mod view;
 

@@ -3,13 +3,13 @@ use std::net::Ipv4Addr;
 #[cfg(any(windows, target_os = "linux"))]
 use std::{path::PathBuf, time::Duration};
 
-pub(super) struct Resolver {
+pub(crate) struct Resolver {
     #[cfg(any(windows, target_os = "linux"))]
     program: PathBuf,
 }
 
 #[cfg(windows)]
-pub(super) fn prepare() -> Result<Resolver, String> {
+pub(crate) fn prepare() -> Result<Resolver, String> {
     let program = crate::quick_tools::system::executable("nslookup.exe")?;
     if !program.try_exists().map_err(|error| error.to_string())? {
         return Err("nslookup.exe is unavailable.".into());
@@ -18,37 +18,95 @@ pub(super) fn prepare() -> Result<Resolver, String> {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn prepare() -> Result<Resolver, String> {
+pub(crate) fn prepare() -> Result<Resolver, String> {
     super::ping::find_program("getent")
         .map(|program| Resolver { program })
         .ok_or_else(|| "getent is unavailable.".into())
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-pub(super) fn prepare() -> Result<Resolver, String> {
-    Err("Reverse lookup is supported on Windows and Linux.".into())
+pub(crate) fn prepare() -> Result<Resolver, String> {
+    Err("Command-line name lookup is supported on Windows and Linux.".into())
 }
 
 impl Resolver {
     #[cfg(any(windows, target_os = "linux"))]
-    pub(super) async fn lookup(&self, ip: Ipv4Addr) -> Result<Option<String>, String> {
+    fn command(&self) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(&self.program);
         command.kill_on_drop(true);
         #[cfg(windows)]
+        command.creation_flags(0x0800_0000);
+        command
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    async fn run(
+        &self,
+        mut command: tokio::process::Command,
+    ) -> Result<Option<std::process::Output>, String> {
+        match tokio::time::timeout(Duration::from_secs(2), command.output()).await {
+            Ok(output) => output.map(Some).map_err(|error| error.to_string()),
+            Err(_) => Ok(None),
+        }
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    #[allow(
+        dead_code,
+        reason = "Forward lookup is part of the shared name lookup wrapper."
+    )]
+    pub(crate) async fn forward(&self, hostname: &str) -> Result<String, String> {
+        // nslookup interprets an argument starting with '-' as an option.
+        if hostname.is_empty() || hostname.starts_with('-') {
+            return Err("Invalid hostname for command-line lookup.".into());
+        }
+        let mut command = self.command();
+        #[cfg(target_os = "linux")]
+        command.arg("hosts");
+        command.arg(hostname);
+        let output = self
+            .run(command)
+            .await?
+            .ok_or_else(|| "Timed out".to_owned())?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let lines: Vec<_> = [stdout.trim(), stderr.trim()]
+            .into_iter()
+            .filter(|line| !line.is_empty())
+            .collect();
+        if lines.is_empty() {
+            Ok(if output.status.success() {
+                "No output".into()
+            } else {
+                format!("No result ({})", output.status)
+            })
+        } else {
+            Ok(lines.join("\n"))
+        }
+    }
+
+    #[cfg(not(any(windows, target_os = "linux")))]
+    #[allow(
+        dead_code,
+        reason = "Forward lookup is part of the shared name lookup wrapper."
+    )]
+    pub(crate) async fn forward(&self, _hostname: &str) -> Result<String, String> {
+        Err("Command-line name lookup is supported on Windows and Linux.".into())
+    }
+
+    #[cfg(any(windows, target_os = "linux"))]
+    pub(crate) async fn reverse(&self, ip: Ipv4Addr) -> Result<Option<String>, String> {
+        let mut command = self.command();
+        #[cfg(windows)]
         let target = reverse_name(ip);
         #[cfg(windows)]
-        command
-            .arg("-type=PTR")
-            .arg(&target)
-            .creation_flags(0x0800_0000);
+        command.arg("-type=PTR").arg(&target);
         #[cfg(target_os = "linux")]
         command.args(["hosts", &ip.to_string()]);
 
-        let Ok(output) = tokio::time::timeout(Duration::from_secs(2), command.output()).await
-        else {
+        let Some(output) = self.run(command).await? else {
             return Ok(None);
         };
-        let output = output.map_err(|error| error.to_string())?;
         let text = String::from_utf8_lossy(&output.stdout);
         #[cfg(windows)]
         let hostname = parse_ptr(&text, &target);
@@ -58,7 +116,7 @@ impl Resolver {
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
-    pub(super) async fn lookup(&self, _ip: Ipv4Addr) -> Result<Option<String>, String> {
+    pub(crate) async fn reverse(&self, _ip: Ipv4Addr) -> Result<Option<String>, String> {
         Ok(None)
     }
 }

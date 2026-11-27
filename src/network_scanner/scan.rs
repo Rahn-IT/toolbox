@@ -8,7 +8,7 @@ use futures_util::{StreamExt, stream};
 use iced::task::{Sipper, sipper};
 use tokio::sync::Semaphore;
 
-use super::{interfaces, netbios, ping, reverse_dns};
+use super::{interfaces, name_lookup, netbios, ping};
 use crate::arp::{self, Device, Scope};
 
 pub(super) const MAX_HOSTS: u32 = 4094;
@@ -197,7 +197,7 @@ pub(super) fn discover(interface: interfaces::Interface) -> impl Sipper<Report, 
                     .notices
                     .push(format!("NetBIOS lookup skipped: {error}")),
             }
-            match reverse_dns::prepare() {
+            match name_lookup::prepare() {
                 Ok(resolver) => {
                     return read_names(report, NameLookup::ReverseDns(resolver))
                         .run(sender)
@@ -214,7 +214,7 @@ pub(super) fn discover(interface: interfaces::Interface) -> impl Sipper<Report, 
 
 enum NameLookup {
     NetBios(netbios::Runner),
-    ReverseDns(reverse_dns::Resolver),
+    ReverseDns(name_lookup::Resolver),
 }
 
 enum Names {
@@ -244,7 +244,7 @@ impl NameLookup {
                 netbios::Outcome::NoReply => Ok(None),
                 netbios::Outcome::Failed(error) => Err(error),
             },
-            Self::ReverseDns(resolver) => Ok(resolver.lookup(ip).await?.map(Names::Hostname)),
+            Self::ReverseDns(resolver) => Ok(resolver.reverse(ip).await?.map(Names::Hostname)),
         }
     }
 }

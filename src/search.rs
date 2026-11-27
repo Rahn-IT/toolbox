@@ -5,7 +5,7 @@ use iced::{
 };
 
 use crate::{
-    OpenedModule, device_scan,
+    OpenedModule, analyse_connection, device_scan, dns_cache,
     encoder::{Encoder, Encoding},
     mailbox_scanner, network_scanner, nut, path_length_checker, spelling_alphabet, wake_on_lan,
 };
@@ -75,6 +75,20 @@ const TOOLS: &[Tool] = &[
     )
     .keywords(&["phonetic", "nato", "buchstabieralphabet"]),
     Tool::new(
+        analyse_connection::State::TITLE,
+        analyse_connection::State::new,
+    )
+    .keywords(&["connection diagnostics", "http", "https", "tls"]),
+    Tool::new(dns_cache::State::TITLE, dns_cache::State::new).keywords(&[
+        "displaydns",
+        "resolvectl",
+        "cached records",
+        "clear dns cache",
+        "flush dns cache",
+        "flushdns",
+        "ipconfig",
+    ]),
+    Tool::new(
         path_length_checker::PathLengthChecker::TITLE,
         path_length_checker::PathLengthChecker::new,
     )
@@ -113,16 +127,6 @@ const TOOLS: &[Tool] = &[
     Tool::new(restart_print_spooler::TITLE, restart_print_spooler::new)
         .keywords(&["printer", "print queue"])
         .admin_only(),
-    #[cfg(windows)]
-    Tool::new("Flush DNS Cache", || {
-        run_windows_command::new(
-            "Flush DNS Cache",
-            "ipconfig.exe",
-            &["/flushdns"],
-            "DNS resolver cache flushed.",
-        )
-    })
-    .keywords(&["ipconfig", "flushdns"]),
     #[cfg(windows)]
     Tool::new(set_power_config::TITLE, set_power_config::new).keywords(&["power plan", "powercfg"]),
     #[cfg(windows)]
@@ -270,9 +274,16 @@ impl State {
 
         container(
             container(
-                column![search_field, scrollable(results).height(Length::Fill)]
-                    .width(Length::Fill)
-                    .spacing(16),
+                column![
+                    search_field,
+                    scrollable(results)
+                        .direction(scrollable::Direction::Vertical(
+                            scrollable::Scrollbar::new().spacing(8),
+                        ))
+                        .height(Length::Fill),
+                ]
+                .width(Length::Fill)
+                .spacing(16),
             )
             .max_width(680),
         )
@@ -318,6 +329,17 @@ fn result_style(theme: &Theme, status: button::Status, selected: bool) -> button
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_clear_and_flush_queries_find_the_dns_cache_tool() {
+        for query in ["clear", "flush", "flushdns", "flush dns cache"] {
+            assert!(
+                matching_tools(query).any(|(_, tool)| tool.title == dns_cache::State::TITLE),
+                "{query}"
+            );
+        }
+        assert_eq!(matching_tools("flush dns cache").count(), 1);
+    }
 
     #[test]
     fn searching_a_keyword_opens_the_matching_tool() {

@@ -25,13 +25,18 @@ fn main() -> Result<(), iced::Error> {
 }
 
 pub mod action;
+pub mod analyse_connection;
 mod arp;
+mod dns;
+pub mod dns_cache;
 pub mod eml;
 pub mod encoder;
 mod loading;
 pub mod mailbox_scanner;
 pub mod network_scanner;
 pub mod spelling_alphabet;
+#[cfg(windows)]
+mod windows_network;
 pub use network_scanner::device_scan;
 pub mod nut;
 pub mod path_length_checker;
@@ -54,6 +59,8 @@ pub enum Module {
     QuickTool(quick_tools::State),
     Encoder(encoder::Encoder),
     SpellingAlphabet(spelling_alphabet::State),
+    AnalyseConnection(analyse_connection::State),
+    DnsCache(dns_cache::State),
     PathLengthChecker(path_length_checker::PathLengthChecker),
     Nut(nut::Nut),
     WakeOnLan(wake_on_lan::State),

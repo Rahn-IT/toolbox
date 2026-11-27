@@ -11,7 +11,7 @@ use iced::{
     widget::{Id, button, column, container, operation, row, scrollable, space, text, text_input},
 };
 
-use super::{interfaces, netbios, ping, ports, reverse_dns, scan};
+use super::{interfaces, name_lookup, netbios, ping, ports, scan};
 use crate::{
     Module, OpenedModule,
     action::Action,
@@ -426,12 +426,12 @@ async fn ping_device(interface: &interfaces::Interface, ip: Ipv4Addr) -> String 
 }
 
 async fn read_hostname(ip: Ipv4Addr) -> Result<Option<String>, String> {
-    let resolver = reverse_dns::prepare()?;
+    let resolver = name_lookup::prepare()?;
     let _permit = scan::PROBES
         .acquire()
         .await
         .expect("the probe semaphore stays open");
-    resolver.lookup(ip).await
+    resolver.reverse(ip).await
 }
 
 async fn read_netbios(ip: Ipv4Addr) -> Result<Option<String>, String> {

@@ -29,12 +29,16 @@ pub(crate) fn content<'a, Message: 'a>(
     status: &'a str,
 ) -> Column<'a, Message> {
     column![
-        Element::new(Spinner),
+        spinner(),
         title.map(|title| text(title).size(24)),
         text(status)
     ]
     .spacing(10)
     .align_x(Alignment::Center)
+}
+
+pub(crate) fn spinner<'a, Message: 'a>() -> Element<'a, Message> {
+    Element::new(Spinner)
 }
 
 struct Spinner;

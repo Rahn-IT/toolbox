@@ -11,8 +11,8 @@ use iced::{
 
 use crate::action::Action;
 use crate::{
-    Module, device_scan, encoder, mailbox_scanner, network_scanner, nut, path_length_checker,
-    search, spelling_alphabet, wake_on_lan,
+    Module, analyse_connection, device_scan, dns_cache, encoder, mailbox_scanner, network_scanner,
+    nut, path_length_checker, search, spelling_alphabet, wake_on_lan,
 };
 #[cfg(windows)]
 use crate::{quick_install, quick_tools};
@@ -24,6 +24,7 @@ pub enum Message {
     CloseTab(usize),
     Tab(usize, TabMessage),
     CloseRequested,
+    FocusNext,
     LinkPressed(crate::Link),
 }
 
@@ -32,6 +33,8 @@ pub enum TabMessage {
     Search(search::Message),
     Encoder(encoder::Message),
     SpellingAlphabet(spelling_alphabet::Message),
+    AnalyseConnection(analyse_connection::Message),
+    DnsCache(dns_cache::Message),
     PathLengthChecker(path_length_checker::Message),
     Nut(nut::Message),
     WakeOnLan(wake_on_lan::Message),
@@ -82,6 +85,7 @@ impl TabManager {
                 self.apply_action(index, action)
             }
             Message::Tab(index, message) => self.update_tab(index, message),
+            Message::FocusNext => iced::widget::operation::focus_next(),
             Message::CloseRequested => {
                 if self.window_close_tab.is_some() {
                     Task::none()
@@ -170,7 +174,15 @@ impl TabManager {
 
     pub fn subscription(&self) -> Subscription<Message> {
         let close = iced::window::close_requests().map(|_| Message::CloseRequested);
-        if matches!(&self.tabs[&self.selected_tab], Module::Search(_)) {
+        let focus = keyboard::listen().filter_map(|event| match event {
+            keyboard::Event::KeyPressed {
+                key: Key::Named(Named::Tab),
+                modifiers,
+                ..
+            } if modifiers.is_empty() => Some(Message::FocusNext),
+            _ => None,
+        });
+        let active = if matches!(&self.tabs[&self.selected_tab], Module::Search(_)) {
             let navigation = iced::event::listen_with(|event, _, _| {
                 let iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) =
                     event
@@ -189,10 +201,16 @@ impl TabManager {
             })
             .with(self.selected_tab)
             .map(|(index, message)| Message::Tab(index, TabMessage::Search(message)));
-            Subscription::batch([close, navigation])
+            navigation
+        } else if let Module::AnalyseConnection(state) = &self.tabs[&self.selected_tab] {
+            state
+                .subscription()
+                .with(self.selected_tab)
+                .map(|(index, message)| Message::Tab(index, TabMessage::AnalyseConnection(message)))
         } else {
-            close
-        }
+            Subscription::none()
+        };
+        Subscription::batch([close, focus, active])
     }
 
     fn select_tab(&mut self, index: usize) {
@@ -276,6 +294,12 @@ impl TabManager {
             (Module::SpellingAlphabet(state), TabMessage::SpellingAlphabet(message)) => {
                 state.update(message);
                 Action::None
+            }
+            (Module::AnalyseConnection(state), TabMessage::AnalyseConnection(message)) => {
+                Action::Task(state.update(message).map(TabMessage::AnalyseConnection))
+            }
+            (Module::DnsCache(state), TabMessage::DnsCache(message)) => {
+                Action::Task(state.update(message).map(TabMessage::DnsCache))
             }
             (Module::PathLengthChecker(state), TabMessage::PathLengthChecker(message)) => {
                 state.update(message).map(TabMessage::PathLengthChecker)
@@ -400,6 +424,8 @@ impl Module {
             Self::Search(_) => search::State::TITLE,
             Self::Encoder(state) => state.title(),
             Self::SpellingAlphabet(_) => spelling_alphabet::State::TITLE,
+            Self::AnalyseConnection(_) => analyse_connection::State::TITLE,
+            Self::DnsCache(_) => dns_cache::State::TITLE,
             Self::PathLengthChecker(_) => path_length_checker::PathLengthChecker::TITLE,
             Self::Nut(_) => nut::Nut::TITLE,
             Self::WakeOnLan(_) => wake_on_lan::State::TITLE,
@@ -420,6 +446,8 @@ impl Module {
             }
             Self::Encoder(state) => state.view().map(TabMessage::Encoder),
             Self::SpellingAlphabet(state) => state.view().map(TabMessage::SpellingAlphabet),
+            Self::AnalyseConnection(state) => state.view().map(TabMessage::AnalyseConnection),
+            Self::DnsCache(state) => state.view().map(TabMessage::DnsCache),
             Self::PathLengthChecker(state) => state.view().map(TabMessage::PathLengthChecker),
             Self::Nut(state) => state.view().map(TabMessage::Nut),
             Self::WakeOnLan(state) => state.view().map(TabMessage::WakeOnLan),

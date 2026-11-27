@@ -6,25 +6,25 @@ use std::{path::PathBuf, time::Duration};
 use tokio::process::Command;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct Name {
+pub(crate) struct Name {
     pub name: String,
     pub suffix: u8,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Outcome {
+pub(crate) enum Outcome {
     Found(Vec<Name>),
     NoReply,
     Failed(String),
 }
 
-pub(super) struct Runner {
+pub(crate) struct Runner {
     #[cfg(any(windows, target_os = "linux"))]
     program: PathBuf,
 }
 
 #[cfg(windows)]
-pub(super) fn prepare() -> Result<Option<Runner>, String> {
+pub(crate) fn prepare() -> Result<Option<Runner>, String> {
     let program = crate::quick_tools::system::executable("nbtstat.exe")?;
     if !program.try_exists().map_err(|error| error.to_string())? {
         return Ok(None);
@@ -33,18 +33,18 @@ pub(super) fn prepare() -> Result<Option<Runner>, String> {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn prepare() -> Result<Option<Runner>, String> {
+pub(crate) fn prepare() -> Result<Option<Runner>, String> {
     Ok(super::ping::find_program("nmblookup").map(|program| Runner { program }))
 }
 
 #[cfg(not(any(windows, target_os = "linux")))]
-pub(super) fn prepare() -> Result<Option<Runner>, String> {
+pub(crate) fn prepare() -> Result<Option<Runner>, String> {
     Ok(None)
 }
 
 impl Runner {
     #[cfg(any(windows, target_os = "linux"))]
-    pub(super) async fn lookup(&self, target: Ipv4Addr) -> Outcome {
+    pub(crate) async fn lookup(&self, target: Ipv4Addr) -> Outcome {
         let mut command = Command::new(&self.program);
         command.kill_on_drop(true).env("LC_ALL", "C").arg("-A");
         #[cfg(windows)]
@@ -62,7 +62,7 @@ impl Runner {
     }
 
     #[cfg(not(any(windows, target_os = "linux")))]
-    pub(super) async fn lookup(&self, _target: Ipv4Addr) -> Outcome {
+    pub(crate) async fn lookup(&self, _target: Ipv4Addr) -> Outcome {
         Outcome::Failed("NetBIOS lookups are supported on Windows and Linux.".into())
     }
 }
