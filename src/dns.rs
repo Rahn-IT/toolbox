@@ -16,6 +16,7 @@ use hickory_client::{
 use tokio_rustls::rustls;
 
 const TIMEOUT: Duration = Duration::from_secs(3);
+pub(crate) mod dnssec;
 
 #[cfg(unix)]
 pub(crate) async fn configured_server() -> Result<Option<SocketAddr>, String> {
@@ -56,6 +57,23 @@ pub(crate) enum Server {
 }
 
 impl Server {
+    pub(crate) async fn signed_material(
+        self,
+        name: Name,
+        record_type: RecordType,
+    ) -> Result<DnsResponse, String> {
+        let mut request = Message::new();
+        let mut edns = hickory_client::proto::op::Edns::new();
+        edns.set_dnssec_ok(true);
+        request
+            .add_query(Query::query(name, record_type))
+            .set_recursion_desired(true)
+            .set_edns(edns);
+        tokio::time::timeout(TIMEOUT, self.exchange(request))
+            .await
+            .map_err(|_| "Timed out".to_owned())?
+    }
+
     pub(crate) async fn query(
         self,
         name: Name,

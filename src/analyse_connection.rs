@@ -340,6 +340,9 @@ impl State {
             self.resolver
                 .view()
                 .map(|view| view.map(Message::Resolution)),
+            self.resolver
+                .dnssec_view()
+                .map(|view| view.map(Message::Resolution)),
             self.connectivity_view(),
             self.http.view(self.can_edit()),
         ]

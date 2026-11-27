@@ -5,10 +5,11 @@ use std::{
     net::{IpAddr, Ipv6Addr, SocketAddr},
 };
 
+use crate::dns::dnssec;
 use hickory_client::proto::rr::Name;
 use iced::{
     Alignment, Border, Element, Length, Task, color,
-    widget::{column, container, row, rule, text},
+    widget::{column, container, row, rule, space, text},
 };
 use lookup::DnsReport;
 
@@ -37,7 +38,7 @@ impl<T> Check<T> {
                 .align_y(Alignment::Center)
                 .into(),
             Self::Complete(result) => complete(result),
-            Self::Failed(error) => text(error).into(),
+            Self::Failed(error) => dns_details(error),
             Self::Skipped => return None,
         })
     }
@@ -61,6 +62,32 @@ pub enum Message {
     NetBiosFinished(Result<Option<String>, String>),
     ConfiguredFinished(Option<SocketAddr>, Result<DnsReport, String>),
     DnsFinished(DnsCheck, Result<DnsReport, String>),
+    DnssecFinished(PublicProvider, dnssec::Report),
+    ConfiguredSignaturesFinished(dnssec::ConfiguredReport),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PublicProvider {
+    Google,
+    Cloudflare,
+}
+
+impl PublicProvider {
+    const ALL: [Self; 2] = [Self::Google, Self::Cloudflare];
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Google => "Google",
+            Self::Cloudflare => "Cloudflare",
+        }
+    }
+
+    fn server(self) -> crate::dns::Server {
+        match self {
+            Self::Google => lookup::GOOGLE,
+            Self::Cloudflare => lookup::CLOUDFLARE,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +104,8 @@ enum ReadyCheck {
     System,
     NetBios,
     Dns(DnsCheck),
+    Dnssec(PublicProvider),
+    ConfiguredSignatures(SocketAddr),
 }
 
 #[derive(Default)]
@@ -118,6 +147,8 @@ impl Resolver {
         checks.google = Check::Complete(public());
         checks.cloudflare = Check::Complete(public());
         checks.authoritative = Check::Complete(authority);
+        checks.dnssec = [Check::Skipped, Check::Skipped];
+        checks.configured_signatures = Check::Skipped;
         resolver
     }
 
@@ -187,6 +218,8 @@ impl Resolver {
                     google: public(),
                     cloudflare: public(),
                     authoritative: public(),
+                    dnssec: [public_dnssec(local), public_dnssec(local)],
+                    configured_signatures: Check::Pending,
                 }));
             }
             message => match self {
@@ -219,6 +252,69 @@ impl Resolver {
                 .into(),
         )
     }
+
+    pub fn dnssec_view(&self) -> Option<Element<'_, Message>> {
+        let Self::Hostname(checks) = self else {
+            return None;
+        };
+        if matches!(checks.cache, Check::Pending | Check::Checking) {
+            return None;
+        }
+        let mut rows =
+            PublicProvider::ALL
+                .map(|provider| {
+                    let result =
+                        checks.dnssec[provider as usize].view(|report| {
+                            column(report.details.iter().map(|line| {
+                                text(line).wrapping(text::Wrapping::WordOrGlyph).into()
+                            }))
+                            .spacing(4)
+                            .into()
+                        });
+                    (provider.name(), result)
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
+        if !matches!(checks.configured_signatures, Check::Pending) {
+            rows.push((
+                "Configured DNS",
+                checks.configured_signatures.view(|report| {
+                    let mut result = column![].spacing(4);
+                    if !report.observed.is_empty() {
+                        result = result.push(text("Returned signatures").size(14));
+                        result =
+                            result.extend(report.observed.iter().map(|line| {
+                                text(line).wrapping(text::Wrapping::WordOrGlyph).into()
+                            }));
+                    }
+                    result
+                        .push(
+                            row![
+                                text("Local validation").size(14),
+                                space::horizontal(),
+                                dnssec_badge(report.validation.verdict),
+                            ]
+                            .align_y(Alignment::Center),
+                        )
+                        .extend(
+                            report.validation.details.iter().map(|line| {
+                                text(line).wrapping(text::Wrapping::WordOrGlyph).into()
+                            }),
+                        )
+                        .into()
+                }),
+            ));
+        }
+        super::check_view::table("DNSSEC", None, rows)
+    }
+}
+
+fn public_dnssec(local: bool) -> Check<dnssec::Report> {
+    if local {
+        Check::Skipped
+    } else {
+        Check::Pending
+    }
 }
 
 fn parse_ip(host: &str) -> Option<IpAddr> {
@@ -242,6 +338,8 @@ pub struct HostnameChecks {
     google: Check<DnsReport>,
     cloudflare: Check<DnsReport>,
     authoritative: Check<DnsReport>,
+    dnssec: [Check<dnssec::Report>; 2],
+    configured_signatures: Check<dnssec::ConfiguredReport>,
 }
 
 impl HostnameChecks {
@@ -267,6 +365,8 @@ impl HostnameChecks {
         self.cache.outstanding()
             || self.system.outstanding()
             || self.netbios.outstanding()
+            || self.dnssec.iter().any(Check::outstanding)
+            || self.configured_signatures.outstanding()
             || self
                 .dns_checks()
                 .into_iter()
@@ -282,6 +382,12 @@ impl HostnameChecks {
                         ReadyCheck::System => self.system = Check::Checking,
                         ReadyCheck::NetBios => self.netbios = Check::Checking,
                         ReadyCheck::Dns(check) => *self.dns_check_mut(check) = Check::Checking,
+                        ReadyCheck::Dnssec(provider) => {
+                            self.dnssec[provider as usize] = Check::Checking
+                        }
+                        ReadyCheck::ConfiguredSignatures(_) => {
+                            self.configured_signatures = Check::Checking
+                        }
                     }
                 }
             }
@@ -305,12 +411,26 @@ impl HostnameChecks {
             {
                 self.configured_server = server;
                 self.configured = result.into();
+                if server.is_none() {
+                    self.configured_signatures =
+                        Check::Complete(dnssec::ConfiguredReport::unavailable());
+                }
             }
             Message::DnsFinished(check, result) => {
                 let state = self.dns_check_mut(check);
                 if matches!(state, Check::Checking) {
                     *state = result.into();
                 }
+            }
+            Message::DnssecFinished(provider, report)
+                if matches!(self.dnssec[provider as usize], Check::Checking) =>
+            {
+                self.dnssec[provider as usize] = Check::Complete(report);
+            }
+            Message::ConfiguredSignaturesFinished(details)
+                if matches!(self.configured_signatures, Check::Checking) =>
+            {
+                self.configured_signatures = Check::Complete(details);
             }
             _ => {}
         }
@@ -333,6 +453,15 @@ impl HostnameChecks {
         ready.extend(self.dns_checks().into_iter().filter_map(|(check, state)| {
             matches!(state, Check::Pending).then_some(ReadyCheck::Dns(check))
         }));
+        ready.extend(PublicProvider::ALL.into_iter().filter_map(|provider| {
+            matches!(self.dnssec[provider as usize], Check::Pending)
+                .then_some(ReadyCheck::Dnssec(provider))
+        }));
+        if matches!(self.configured_signatures, Check::Pending)
+            && let Some(server) = self.configured_server
+        {
+            ready.push(ReadyCheck::ConfiguredSignatures(server));
+        }
         ready
     }
 
@@ -379,6 +508,14 @@ impl HostnameChecks {
                     std::convert::identity,
                 )
             }
+            ReadyCheck::Dnssec(provider) => Task::perform(
+                dnssec::inspect(provider.server(), self.name.to_ascii()),
+                move |report| Message::DnssecFinished(provider, report),
+            ),
+            ReadyCheck::ConfiguredSignatures(server) => Task::perform(
+                dnssec::inspect_configured(server, self.name.to_ascii()),
+                Message::ConfiguredSignaturesFinished,
+            ),
         }
     }
 
@@ -386,13 +523,12 @@ impl HostnameChecks {
         const CHECK_WIDTH: f32 = 160.0;
         let (local_override, system_override) = self.dns_overrides();
         let check = |label| column![text(label)].spacing(4).width(CHECK_WIDTH);
-        let encrypted_check = |label, result: &Check<DnsReport>| {
-            let name = check(label);
+        let encrypted_check = |provider: PublicProvider, result: &Check<DnsReport>| {
+            let mut name = check(provider.name());
             if matches!(result, Check::Complete(_)) {
-                name.push(super::check_view::badge("Encrypted", true))
-            } else {
-                name
+                name = name.push(super::check_view::badge("Encrypted", true));
             }
+            name
         };
         let mut configured = check("Configured DNS");
         if let Some(server) = self.configured_server {
@@ -446,22 +582,22 @@ impl HostnameChecks {
             ),
             (
                 configured,
-                self.configured.view(|report| {
-                    row![
-                        container(dns_result(report)).width(Length::Fill),
-                        local_override.then(|| override_badge("Local DNS Override")),
-                    ]
-                    .spacing(12)
-                    .into()
-                }),
+                dns_result_with_badges(
+                    &self.configured,
+                    match &self.configured_signatures {
+                        Check::Complete(report) => Some(report.validation.verdict),
+                        _ => None,
+                    },
+                    local_override,
+                ),
             ),
             (
-                encrypted_check("Google", &self.google),
-                self.google.view(dns_result),
+                encrypted_check(PublicProvider::Google, &self.google),
+                self.public_dns_result(PublicProvider::Google, &self.google),
             ),
             (
-                encrypted_check("Cloudflare", &self.cloudflare),
-                self.cloudflare.view(dns_result),
+                encrypted_check(PublicProvider::Cloudflare, &self.cloudflare),
+                self.public_dns_result(PublicProvider::Cloudflare, &self.cloudflare),
             ),
             (authority, self.authoritative.view(dns_result)),
         ];
@@ -484,6 +620,18 @@ impl HostnameChecks {
         ]
         .spacing(8)
         .into()
+    }
+
+    fn public_dns_result<'a>(
+        &'a self,
+        provider: PublicProvider,
+        result: &'a Check<DnsReport>,
+    ) -> Option<Element<'a, Message>> {
+        let verdict = match &self.dnssec[provider as usize] {
+            Check::Complete(report) => Some(report.verdict),
+            _ => None,
+        };
+        dns_result_with_badges(result, verdict, false)
     }
 
     fn dns_overrides(&self) -> (bool, bool) {
@@ -523,6 +671,33 @@ impl HostnameChecks {
             _ => false,
         };
         (local_override, system_override)
+    }
+}
+
+fn dns_result_with_badges(
+    result: &Check<DnsReport>,
+    verdict: Option<dnssec::Verdict>,
+    local_override: bool,
+) -> Option<Element<'_, Message>> {
+    Some(
+        row![
+            container(result.view(dns_result)?).width(Length::Fill),
+            local_override.then(|| override_badge("Local DNS Override")),
+            verdict.map(dnssec_badge),
+        ]
+        .spacing(12)
+        .into(),
+    )
+}
+
+fn dnssec_badge(verdict: dnssec::Verdict) -> Element<'static, Message> {
+    use super::check_view::{badge, neutral_badge, warning_badge};
+    match verdict {
+        dnssec::Verdict::Validated => badge("DNSSEC validated", true),
+        dnssec::Verdict::Unsigned => warning_badge("Unsigned"),
+        dnssec::Verdict::MissingSignature => badge("Missing DNSSEC signature", false),
+        dnssec::Verdict::Failed => badge("Validation failed", false),
+        dnssec::Verdict::Unavailable => neutral_badge("DnsSec not available"),
     }
 }
 
@@ -576,8 +751,14 @@ impl From<String> for DnsReport {
 }
 
 fn dns_result(report: &DnsReport) -> Element<'_, Message> {
-    column(report.details.lines().map(|line| {
-        if let Some(alias) = line.strip_prefix("CNAME ") {
+    dns_details(&report.details)
+}
+
+fn dns_details(details: &str) -> Element<'_, Message> {
+    column(details.lines().map(|line| {
+        if line == "Server Failure" {
+            super::check_view::badge(line, false)
+        } else if let Some(alias) = line.strip_prefix("CNAME ") {
             let tag =
                 container(text("CNAME").size(14))
                     .padding([3, 8])
@@ -668,7 +849,7 @@ mod tests {
         assert_eq!(resolver.next_checks().units(), 0);
 
         resolver.update(Message::CacheFinished(Err("Unavailable".into())));
-        assert_eq!(resolver.next_checks().units(), 5);
+        assert_eq!(resolver.next_checks().units(), 7);
         resolver.update(Message::ChecksStarted);
         let Resolver::Hostname(checks) = &resolver else {
             panic!("expected hostname checks")
@@ -705,6 +886,21 @@ mod tests {
         assert!(matches!(checks.configured, Check::Failed(_)));
         for check in [DnsCheck::Cloudflare, DnsCheck::Authoritative] {
             resolver.update(Message::DnsFinished(check, Ok("Answer".to_owned().into())));
+        }
+        assert!(!resolver.done());
+        assert_eq!(resolver.next_checks().units(), 1);
+        resolver.update(Message::ChecksStarted);
+        resolver.update(Message::ConfiguredSignaturesFinished(
+            dnssec::ConfiguredReport::unavailable(),
+        ));
+        for provider in PublicProvider::ALL {
+            resolver.update(Message::DnssecFinished(
+                provider,
+                dnssec::Report {
+                    verdict: dnssec::Verdict::Unavailable,
+                    details: vec!["Timed out".into()],
+                },
+            ));
         }
         assert!(resolver.done());
     }

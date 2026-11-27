@@ -1,0 +1,32 @@
+project: Toolbox
+description: Rust desktop toolbox with a DNSSEC trust-chain plan for the connection analyzer
+repo: Rahn-IT/toolbox
+default_branch: master
+milestone: none
+handoff:
+  dir: .claude/map/dnssec-trust-chain
+  prefix: SESSION_HANDOFF
+workspace:
+  - name: toolbox
+    path: "."
+    role: Desktop binary
+checklist:
+  quick:
+    - cargo fmt --check
+    - cargo check --locked
+  verify:
+    - cargo test --locked
+  lint:
+    - cargo clippy --locked
+key_files:
+  - AGENTS.md
+  - Cargo.toml
+  - src/dns.rs
+  - src/analyse_connection.rs
+  - src/analyse_connection/name_resolution.rs
+  - src/analyse_connection/name_resolution/lookup.rs
+  - src/analyse_connection/check_view.rs
+  - .claude/map/dnssec-trust-chain/MAP_PLAN.md
+workflow:
+  - Track phases in the local handoff.
+  - Preserve ordinary DNS behavior and provider separation.

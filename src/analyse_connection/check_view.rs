@@ -21,6 +21,12 @@ pub(super) fn warning_badge<'a, Message: 'a>(
     colored_badge(label, color!(0xF2C94C), color!(0x241A00))
 }
 
+pub(super) fn neutral_badge<'a, Message: 'a>(
+    label: impl text::IntoFragment<'a>,
+) -> Element<'a, Message> {
+    colored_badge(label, color!(0x656B74), Color::WHITE)
+}
+
 fn colored_badge<'a, Message: 'a>(
     label: impl text::IntoFragment<'a>,
     background: Color,
