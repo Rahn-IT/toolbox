@@ -1,14 +1,18 @@
+mod certificate_overlay;
 mod check_view;
 mod local_link;
 mod name_resolution;
 mod port_connectivity;
+mod tls;
 
 use std::{fmt, net::IpAddr, num::NonZeroU16};
 
 use iced::{
-    Element, Length, Subscription, Task,
+    Alignment, Element, Length, Subscription, Task,
     keyboard::{self, Key, key::Named},
-    widget::{button, column, container, pick_list, scrollable, text, text_input},
+    widget::{
+        button, column, container, pick_list, row, scrollable, space, stack, text, text_input,
+    },
 };
 
 const HOST_INPUT_ID: &str = "analyse-connection-host";
@@ -63,6 +67,8 @@ pub enum Message {
     Resolution(name_resolution::Message),
     LocalLink(local_link::Message),
     PortConnectivity(port_connectivity::Message),
+    ShowCertificates,
+    CloseCertificates,
 }
 
 #[derive(Default)]
@@ -70,10 +76,14 @@ pub struct State {
     host: String,
     port: String,
     protocol: Option<Protocol>,
+    #[allow(dead_code, reason = "Reserved for protocol detection.")]
+    detected_protocol: Option<Protocol>,
     target_ip: Option<IpAddr>,
     resolver: name_resolution::Resolver,
     local_link: local_link::State,
     port_connectivity: port_connectivity::State,
+    tls: tls::State,
+    certificate_overlay: certificate_overlay::ViewState,
 }
 
 impl State {
@@ -88,7 +98,15 @@ impl State {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::HostEdited(host) if !self.is_running() => {
+            Message::ShowCertificates => {
+                self.certificate_overlay.open = self.tls.certificates().is_some();
+                return Task::none();
+            }
+            Message::CloseCertificates => {
+                self.certificate_overlay.open = false;
+                return Task::none();
+            }
+            Message::HostEdited(host) if self.can_edit() => {
                 let host = host
                     .chars()
                     .filter(|character| {
@@ -106,10 +124,11 @@ impl State {
                     self.resolver = name_resolution::Resolver::default();
                     self.local_link = local_link::State::default();
                     self.port_connectivity = port_connectivity::State::default();
+                    self.tls = tls::State::default();
                 }
                 return Task::none();
             }
-            Message::PortEdited(port) if !self.is_running() => {
+            Message::PortEdited(port) if self.can_edit() => {
                 let port = port.chars().filter(char::is_ascii_digit).collect();
                 if self.port != port {
                     let previous = self.port_number();
@@ -119,10 +138,14 @@ impl State {
                         self.protocol = current.map(Protocol::for_port);
                     }
                     self.port_connectivity = port_connectivity::State::default();
+                    self.tls = tls::State::default();
                 }
                 return Task::none();
             }
-            Message::ProtocolSelected(protocol) => {
+            Message::ProtocolSelected(protocol) if !self.certificate_overlay.open => {
+                if self.protocol != Some(protocol) && !self.is_running() {
+                    self.tls = tls::State::default();
+                }
                 self.protocol = Some(protocol);
                 return Task::none();
             }
@@ -134,13 +157,25 @@ impl State {
                     port_connectivity::State::Disabled,
                     port_connectivity::State::Waiting,
                 );
+                self.tls = tls::State::new(self.host.trim(), self.protocol);
                 self.resolver
                     .update(name_resolution::Message::Start(self.host.trim().into()));
             }
             Message::Resolution(message) => self.resolver.update(message),
             Message::LocalLink(message) => self.local_link.update(message),
-            Message::PortConnectivity(message) => self.port_connectivity.update(message),
-            Message::Analyse | Message::HostEdited(_) | Message::PortEdited(_) => {
+            Message::PortConnectivity(port_connectivity::Message::TlsFinished(report)) => {
+                self.tls.finish(report);
+            }
+            Message::PortConnectivity(message) => {
+                self.port_connectivity.update(message);
+                if self.port_connectivity.connected() {
+                    self.tls.start();
+                }
+            }
+            Message::Analyse
+            | Message::HostEdited(_)
+            | Message::PortEdited(_)
+            | Message::ProtocolSelected(_) => {
                 return Task::none();
             }
         }
@@ -159,7 +194,7 @@ impl State {
         let link = self.local_link.next_checks().map(Message::LocalLink);
         let port = self
             .port_connectivity
-            .next_checks()
+            .next_checks(self.tls.request())
             .map(Message::PortConnectivity);
 
         // Claim ready checks before returning to iced, where other checks may finish.
@@ -175,10 +210,15 @@ impl State {
         self.resolver.is_running()
             || self.local_link.is_running()
             || self.port_connectivity.is_running()
+            || self.tls.is_running()
     }
 
     fn can_analyse(&self) -> bool {
-        !self.host.trim().is_empty() && !self.is_running() && self.valid_port()
+        !self.host.trim().is_empty() && self.can_edit() && self.valid_port()
+    }
+
+    fn can_edit(&self) -> bool {
+        !self.is_running() && !self.certificate_overlay.open
     }
 
     fn port_number(&self) -> Option<NonZeroU16> {
@@ -190,6 +230,15 @@ impl State {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
+        if self.certificate_overlay.open {
+            return keyboard::listen().filter_map(|event| match event {
+                keyboard::Event::KeyPressed {
+                    key: Key::Named(Named::Escape),
+                    ..
+                } => Some(Message::CloseCertificates),
+                _ => None,
+            });
+        }
         if !self.can_analyse() {
             return Subscription::none();
         }
@@ -211,7 +260,7 @@ impl State {
                 text("Hostname or IP"),
                 text_input("example.com", &self.host)
                     .id(HOST_INPUT_ID)
-                    .on_input_maybe((!self.is_running()).then_some(Message::HostEdited))
+                    .on_input_maybe(self.can_edit().then_some(Message::HostEdited))
                     .on_submit_maybe(submit.clone())
                     .padding([12, 16])
                     .style(crate::rounded_input_style),
@@ -220,7 +269,7 @@ impl State {
             column![
                 text("Port (optional)"),
                 text_input("", &self.port)
-                    .on_input_maybe((!self.is_running()).then_some(Message::PortEdited))
+                    .on_input_maybe(self.can_edit().then_some(Message::PortEdited))
                     .on_submit_maybe(submit.clone())
                     .padding([12, 16])
                     .style(crate::rounded_input_style),
@@ -248,23 +297,92 @@ impl State {
             self.resolver
                 .view()
                 .map(|view| view.map(Message::Resolution)),
-            self.local_link
-                .view()
-                .map(|view| view.map(Message::LocalLink)),
-            self.port_connectivity
-                .view()
-                .map(|view| view.map(Message::PortConnectivity)),
+            self.connectivity_view(),
         ]
         .spacing(24);
-        scrollable(container(content).width(Length::Fill).padding(24))
-            .height(Length::Fill)
-            .into()
+        let screen =
+            scrollable(container(content).width(Length::Fill).padding(24)).height(Length::Fill);
+        if self.certificate_overlay.open
+            && let Some(chain) = self.tls.certificates()
+        {
+            stack![screen, certificate_overlay::view(chain)].into()
+        } else {
+            screen.into()
+        }
+    }
+
+    fn connectivity_view(&self) -> Option<Element<'_, Message>> {
+        let target = self.target_ip?;
+        let target = self
+            .port_connectivity
+            .visible_endpoint()
+            .map_or_else(|| target.to_string(), |endpoint| endpoint.to_string());
+        check_view::connectivity(
+            target,
+            [
+                (
+                    "ARP-Table",
+                    self.local_link
+                        .arp_view()
+                        .map(|view| view.map(Message::LocalLink)),
+                ),
+                (
+                    "ICMP echo",
+                    self.local_link
+                        .ping_view()
+                        .map(|view| view.map(Message::LocalLink)),
+                ),
+                (
+                    "TCP connection",
+                    self.port_connectivity
+                        .view()
+                        .map(|view| view.map(Message::PortConnectivity)),
+                ),
+                (
+                    "TLS Handshake",
+                    self.tls.view().map(|view| {
+                        row![
+                            view.map(Message::PortConnectivity),
+                            space::horizontal(),
+                            self.tls.certificates().map(|_| {
+                                button("Show Certificates").on_press(Message::ShowCertificates)
+                            }),
+                        ]
+                        .spacing(12)
+                        .align_y(Alignment::Center)
+                        .into()
+                    }),
+                ),
+            ],
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tls_becomes_visible_only_after_tcp_succeeds_for_an_explicit_tls_protocol() {
+        for (protocol, should_check_tls) in [
+            (Protocol::Tls, true),
+            (Protocol::Https, true),
+            (Protocol::Http, false),
+            (Protocol::Autodetect, false),
+            (Protocol::Unknown, false),
+        ] {
+            let mut state = State::default();
+            let _ = state.update(Message::HostEdited("192.0.2.1".into()));
+            let _ = state.update(Message::PortEdited("443".into()));
+            let _ = state.update(Message::ProtocolSelected(protocol));
+            let _ = state.update(Message::Analyse);
+            assert!(state.tls.view().is_none());
+            let _ = state.update(Message::PortConnectivity(
+                port_connectivity::Message::Finished(port_connectivity::Outcome::Connected),
+            ));
+            assert_eq!(state.tls.view().is_some(), should_check_tls);
+        }
+    }
 
     #[test]
     fn a_new_port_suggests_a_protocol_and_allows_a_manual_override() {

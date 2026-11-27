@@ -33,26 +33,40 @@ pub(super) fn checking<'a, Message: 'a>() -> Element<'a, Message> {
         .into()
 }
 
-pub(super) fn section<'a, Message: 'a>(
-    title: String,
-    label: &'static str,
-    result: Element<'a, Message>,
-) -> Element<'a, Message> {
-    column![
-        text(title).size(24),
-        container(row![text("Check").width(160), text("Result")].spacing(12)).padding([0, 12]),
-        rule::horizontal(1),
-        container(
-            row![
-                text(label).width(160),
-                container(result).width(Length::Fill)
-            ]
-            .spacing(12)
-        )
-        .width(Length::Fill)
-        .padding([10, 12])
-        .style(container::rounded_box),
-    ]
-    .spacing(8)
-    .into()
+pub(super) fn connectivity<'a, Message: 'a>(
+    target: String,
+    checks: impl IntoIterator<Item = (&'static str, Option<Element<'a, Message>>)>,
+) -> Option<Element<'a, Message>> {
+    const CHECK_WIDTH: f32 = 160.0;
+    let mut rows = checks
+        .into_iter()
+        .filter_map(|(label, result)| {
+            Some(
+                container(
+                    row![
+                        text(label).width(CHECK_WIDTH),
+                        container(result?).width(Length::Fill)
+                    ]
+                    .spacing(12),
+                )
+                .width(Length::Fill)
+                .padding([10, 12])
+                .style(container::rounded_box)
+                .into(),
+            )
+        })
+        .peekable();
+    rows.peek()?;
+    Some(
+        column![
+            text("Connectivity").size(24),
+            text(target).size(14),
+            container(row![text("Check").width(CHECK_WIDTH), text("Result")].spacing(12))
+                .padding([0, 12]),
+            rule::horizontal(1),
+            column(rows).spacing(6),
+        ]
+        .spacing(8)
+        .into(),
+    )
 }

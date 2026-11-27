@@ -19,6 +19,7 @@ webpki-roots = "1"
 futures-util = "0.3"
 hickory-client = { version = "0.25.2", features = ["https-ring", "webpki-roots"] }
 hickory-resolver = { version = "0.25.2", default-features = false, features = ["tokio"] }
+x509-parser = { version = "0.18.1", features = ["verify"] }
 
 [target.'cfg(unix)'.dependencies]
 hickory-resolver = { version = "0.25.2", default-features = false, features = ["system-config"] }

@@ -5,10 +5,10 @@ use std::{
 
 use iced::{
     Alignment, Element, Task,
-    widget::{column, row, text},
+    widget::{row, text},
 };
 
-use super::check_view::{badge, checking, error_badge, section};
+use super::check_view::{badge, checking, error_badge};
 
 use crate::{
     arp,
@@ -114,9 +114,8 @@ impl State {
         }
     }
 
-    pub fn view(&self) -> Option<Element<'_, Message>> {
-        let run = self.run.as_ref()?;
-        let ping = match &run.phase {
+    pub fn ping_view(&self) -> Option<Element<'_, Message>> {
+        Some(match &self.run.as_ref()?.phase {
             Phase::PingPending => return None,
             Phase::Pinging => checking(),
             Phase::RoutePending(ping, _)
@@ -124,16 +123,11 @@ impl State {
             | Phase::ArpPending(ping, ..)
             | Phase::ReadingArp(ping)
             | Phase::Done(ping, _) => ping.view(),
-        };
-        let arp = run.phase.arp_view();
-        Some(
-            column![
-                arp.map(|result| section(format!("Local Link ({})", run.target), "ARP", result)),
-                section(format!("Ping ({})", run.target), "ICMP echo", ping),
-            ]
-            .spacing(24)
-            .into(),
-        )
+        })
+    }
+
+    pub fn arp_view(&self) -> Option<Element<'_, Message>> {
+        self.run.as_ref()?.phase.arp_view()
     }
 }
 
