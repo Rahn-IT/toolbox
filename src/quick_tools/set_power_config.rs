@@ -7,7 +7,7 @@ const SETTINGS: &[(&str, &str)] = &[
     ("-standby-timeout-ac", "0"),
 ];
 
-pub const TITLE: &str = "Set Power Config";
+pub const TITLE: &str = "Set Power Plan Timeouts";
 
 pub fn new() -> crate::OpenedModule {
     super::start(TITLE, run)

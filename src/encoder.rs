@@ -20,9 +20,9 @@ impl Encoding {
 
     pub const fn title(self) -> &'static str {
         match self {
-            Self::Eml => "EML Encode",
-            Self::Base64 => "Base64 Encode",
-            Self::Unicode => "Unicode Encode",
+            Self::Eml => "EML Encoder",
+            Self::Base64 => "Base64 Encoder",
+            Self::Unicode => "Unicode Encoder",
         }
     }
 
